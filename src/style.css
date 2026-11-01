@@ -1,0 +1,236 @@
+:root {
+  color-scheme: dark;
+  --hud-bg: rgba(14, 21, 28, 0.56);
+  --hud-border: rgba(255, 255, 255, 0.13);
+  --hud-text: rgba(242, 247, 250, 0.92);
+  --hud-muted: rgba(205, 219, 229, 0.66);
+  --crimson: #c91422;
+  --crimson-glow: rgba(201, 20, 34, 0.34);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', system-ui, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0d151c;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.stage {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#gpu-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+#gpu-canvas:active {
+  cursor: grabbing;
+}
+
+.hud {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 10;
+  transition: opacity 0.35s ease, transform 0.35s ease;
+  max-width: calc(100vw - 24px);
+}
+
+body.zen-mode .hud {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(10px);
+}
+
+.hud-telemetry {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  background: var(--hud-bg);
+  border: 1px solid var(--hud-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--hud-text);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
+}
+
+.rec-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e11d2e;
+  box-shadow: 0 0 8px rgba(225, 29, 46, 0.85);
+}
+
+.hud-mono {
+  font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.hud-sep {
+  color: var(--hud-muted);
+}
+
+.hud-phase {
+  color: var(--hud-muted);
+  white-space: nowrap;
+}
+
+.hud-controls {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--hud-bg);
+  border: 1px solid var(--hud-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.25);
+}
+
+.control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.control-group:last-child {
+  border-right: none;
+}
+
+.hud-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--hud-muted);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.hud-btn:hover {
+  color: var(--hud-text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.hud-btn.is-active {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.hud-btn-accent {
+  color: #ffd7dc;
+  background: rgba(185, 16, 30, 0.36);
+  border-color: rgba(228, 45, 60, 0.42);
+}
+
+.hud-btn-accent:hover {
+  color: #ffffff;
+  background: rgba(205, 20, 36, 0.56);
+}
+
+.fallback-banner {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 35%, #1c2c38, #0b1117);
+  z-index: 50;
+}
+
+.fallback-banner[hidden] {
+  display: none;
+}
+
+.fallback-card {
+  max-width: 460px;
+  padding: 28px 32px;
+  border-radius: 16px;
+  background: rgba(15, 23, 32, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #eef4f8;
+  text-align: center;
+}
+
+.fallback-card h1 {
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.fallback-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: rgba(220, 232, 240, 0.8);
+}
+
+.fallback-reload {
+  margin-top: 18px;
+  appearance: none;
+  border: 1px solid rgba(228, 45, 60, 0.52);
+  background: rgba(185, 16, 30, 0.42);
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.fallback-reload:hover {
+  background: rgba(205, 20, 36, 0.65);
+}
+
+.fallback-reload[hidden] {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .hud-phase {
+    display: none;
+  }
+  .control-group {
+    border-right: none;
+  }
+}

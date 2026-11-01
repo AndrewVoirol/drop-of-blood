@@ -1,0 +1,19 @@
+{
+  "name": "drop-of-blood",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Slow-motion WebGPU 3D fluid & optical simulation of a crimson drop entering clear water",
+  "scripts": {
+    "dev": "vite --port 5179 --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4179 --strictPort",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.64",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.8"
+  }
+}

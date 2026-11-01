@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drop of Blood — Slow-Motion WebGPU Fluid &amp; Optical Study</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23b80a18' d='M16 3C16 3 6 14.6 6 21a10 10 0 0 0 20 0C26 14.6 16 3 16 3z'/%3E%3Ccircle cx='12.5' cy='19.5' r='2.4' fill='%23ff8892' opacity='.55'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="stage">
+      <canvas id="gpu-canvas" aria-label="Slow-motion WebGPU simulation of a crimson drop entering clear water"></canvas>
+
+      <div id="fallback-banner" class="fallback-banner" hidden>
+        <div class="fallback-card">
+          <h1 id="fallback-title">WebGPU Required</h1>
+          <p id="fallback-message">
+            This real-time 3D Navier-Stokes fluid &amp; Beer-Lambert optical simulation requires a browser with WebGPU enabled (Chrome 113+, Edge 113+, or Safari 18+).
+          </p>
+          <button id="btn-reload" type="button" class="fallback-reload" hidden>Reload Simulation</button>
+        </div>
+      </div>
+
+      <aside id="hud" class="hud" aria-label="Simulation controls">
+        <div class="hud-telemetry">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <span id="hud-fps-mode" class="hud-mono">1000 FPS SLOW-MO</span>
+          <span class="hud-sep">·</span>
+          <span id="hud-time" class="hud-mono">T+00.00s</span>
+          <span class="hud-sep">·</span>
+          <span id="hud-phase" class="hud-phase">Aerial Descent</span>
+        </div>
+
+        <div class="hud-controls">
+          <div class="control-group" role="group" aria-label="Playback">
+            <button id="btn-play" type="button" class="hud-btn" title="Pause / Resume (Space)">Pause</button>
+            <button id="btn-replay" type="button" class="hud-btn" title="Reset tank and replay drop (R)">Replay</button>
+            <button id="btn-drop" type="button" class="hud-btn hud-btn-accent" title="Release another drop into current plume (D)">+ Drop</button>
+          </div>
+
+          <div class="control-group" role="group" aria-label="Slow-motion rate">
+            <button type="button" class="hud-btn speed-btn" data-speed="0.42" data-label="2400 FPS ULTRA-SLOW">2400 fps</button>
+            <button type="button" class="hud-btn speed-btn is-active" data-speed="1.0" data-label="1000 FPS SLOW-MO">1000 fps</button>
+            <button type="button" class="hud-btn speed-btn" data-speed="2.0" data-label="500 FPS MEDIUM">500 fps</button>
+          </div>
+
+          <div class="control-group" role="group" aria-label="Camera angle">
+            <button type="button" class="hud-btn cam-btn is-active" data-cam="hero">Follow</button>
+            <button type="button" class="hud-btn cam-btn" data-cam="crown">Crown</button>
+            <button type="button" class="hud-btn cam-btn" data-cam="abyss">Sub-Meniscus</button>
+          </div>
+
+          <div class="control-group" role="group" aria-label="Studio lighting">
+            <button id="btn-lighting" type="button" class="hud-btn" title="Toggle Crystal Backlit vs Dark-Field Rim (L)">Backlit</button>
+            <button id="btn-zen" type="button" class="hud-btn" title="Hide controls (H)">Zen</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
