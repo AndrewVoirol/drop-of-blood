@@ -142,7 +142,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let rDrop = max(drop.posAndRadius.w, 0.010);
   let slugWeight = smoothstep(0.26, 0.85, drop.velOscAndDrain.z);
-  let rNeck = mix(0.013, clamp(rDrop * 0.84 + 0.014, 0.020, 0.056), slugWeight) * azim;
+  let wakeThin = mix(0.46, 1.0, smoothstep(0.018, 0.26, drop.velOscAndDrain.z));
+  let rNeck = mix(0.013 * wakeThin, clamp(rDrop * 0.84 + 0.014, 0.020, 0.056), slugWeight) * azim;
   // Hollow-centered toroidal vortex sheet (84% annular ring + 16% continuous dome membrane overlapping innerRing)
   // keeps heavy RBC buoyancy in the outer rolled torus while preventing pale holes across the upper umbrella cap!
   let innerRing = 0.37 * slugWeight;
@@ -151,14 +152,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let radFracCap = mix(0.14 * slugWeight, max(innerRing * 1.32, 0.08), sqrt(r3.y));
   let radFrac = select(radFracAnnular, radFracCap, isCapVeil);
   let r = rNeck * radFrac;
-  let posXZ = dropXZ + vec2<f32>(cos(theta), sin(theta)) * r;
+  let wakeDriftAngle = u.cameraPosAndTime.w * 1.85 + seed * 3.17;
+  let wakeDriftXZ = vec2<f32>(cos(wakeDriftAngle), sin(wakeDriftAngle * 0.83 + seed))
+                  * (0.0038 * (1.0 - slugWeight) * (1.0 - wakeThin * 0.45));
+  let posXZ = dropXZ + wakeDriftXZ + vec2<f32>(cos(theta), sin(theta)) * r;
   let zStrat = select((r3.z - 0.16 * slugWeight) / max(1.0 - 0.16 * slugWeight, 0.5), r3.z * 3.6, isCapVeil);
-  let posY = neckTopY - mix(0.0008, 0.012, clamp(zStrat, 0.0, 1.0));
+  let posY = neckTopY - mix(0.0012, 0.013, clamp(zStrat, 0.0, 1.0));
 
   // Outer water-sheared contact perimeter starts with slight osmotic pre-swelling; inner core enters 100% intact
   let initLysis = 0.12 * smoothstep(0.74, 1.0, radFrac);
-  let tangentDir = vec3<f32>(-sin(theta) * radFrac, -0.82, cos(theta) * radFrac);
-  let initStretch = normalize(tangentDir) * 0.0038;
+  let tangentDir = vec3<f32>(-sin(theta) * max(radFrac, 0.25), -0.80, cos(theta) * max(radFrac, 0.25));
+  let initStretch = normalize(tangentDir) * 0.0036;
 
   var p: RbcParcel;
   p.posAndMass = vec4<f32>(posXZ.x, posY, posXZ.y, ${INITIAL_PARCEL_VOXEL_MASS.toFixed(5)});
@@ -188,12 +192,12 @@ ${PARCEL_STRUCT_WGSL}
 fn sampleVelWorld(p: vec3<f32>, rouleauxMaturity: f32) -> vec3<f32> {
   let depthBelowSurf = u.surfaceParams.x - p.y;
   let uvw = clamp(worldToUVW(p, u), vec3<f32>(0.002), vec3<f32>(0.998));
-  // Monodisperse stem retention (~0.9 mm/s at meniscus across t = 0..5.2s) transitioning smoothly
-  // into Fahraeus multi-cell rouleaux coin-stack Stokes sedimentation (clearing 100% of column by ~15s post-drain)
-  let settleGate = mix(0.015, 1.0, smoothstep(0.005, 0.072, depthBelowSurf));
-  let rouleauxFall = mix(0.015, 0.056, smoothstep(0.05, 0.42, depthBelowSurf));
+  // Smooth continuous Stokes sedimentation: eliminates both the frozen 0.2mm/s top bead and the 3x 0.165m/s
+  // age cliff that ripped a detached rubbery O-ring out the bottom of the vortex veil!
+  let settleGate = mix(0.38, 1.0, smoothstep(0.002, 0.055, depthBelowSurf));
+  let rouleauxFall = mix(0.020, 0.046, smoothstep(0.04, 0.42, depthBelowSurf));
   let monoSettle = rouleauxFall * settleGate;
-  let stackSettle = mix(0.095, 0.165, smoothstep(0.02, 0.28, depthBelowSurf));
+  let stackSettle = mix(0.032, 0.062, smoothstep(0.04, 0.48, depthBelowSurf));
   let effSettle = mix(monoSettle, stackSettle, rouleauxMaturity);
   return textureSampleLevel(velCenterIn, linSampler, uvw, 0.0).xyz + vec3<f32>(0.0, -effSettle, 0.0);
 }
@@ -288,7 +292,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var ageTicks = floor(rawW);
   var lysis = clamp(rawW - ageTicks, 0.0, 0.98);
   let parcelAge = ageTicks * (1.0 / 240.0);
-  let rouleauxMaturity = smoothstep(5.6, 9.2, parcelAge);
+  let rouleauxMaturity = smoothstep(8.5, 18.0, parcelAge);
 
   // 1. 3rd-order Ralston RK3 advection (RK2 midpoint below 5 cm/s where displacement < 0.04 voxels -> < 0.3 um delta)
   let v1 = sampleVelWorld(pos, rouleauxMaturity);
@@ -340,9 +344,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Gradual mass-conserving consolidation of floor-settled RBC parcels into the persistent Eulerian rouleaux bed (conc.a)
   // via splatLysed in the floor capture zone, preserving settled floor mass across >8-drop ring-buffer wraparounds!
-  if (dt > 0.0 && pos.y < yMin + 0.032) {
-    let settleWeight = 1.0 - smoothstep(yMin + 0.006, yMin + 0.032, pos.y);
-    let dmBed = mass * clamp(settleWeight * dt * 0.95, 0.0, 0.065);
+  if (dt > 0.0 && pos.y < yMin + 0.024) {
+    let settleWeight = 1.0 - smoothstep(yMin + 0.005, yMin + 0.024, pos.y);
+    let dmBed = mass * clamp(settleWeight * dt * 1.55, 0.0, 0.085);
     if (dmBed > 1e-7) {
       mass = max(0.0, mass - dmBed);
       splatTrilinearLysed(clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), dmBed);
@@ -382,15 +386,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // 4. Continuous 4-point tapered filament & 2D sheet-tangent splatting (weights 0.21 + 0.29 + 0.29 + 0.21 == 1.00):
   //    Unstretched slug-core parcels (<0.75 voxels) coalesce into 1 trilinear splat (4x less atomic contention),
-  //    narrow stems stay razor-thin, and expanded curtains stagger uvw1/uvw2 along the azimuthal sheet tangent!
-  if (length(stretch) < 0.0038) {
+  //    while stretched umbrella shoulders & curtains splat origin-independent 2D tangent sheets!
+  let sLenNow = length(stretch);
+  if (sLenNow < 0.0038) {
     splatTrilinearIntact(clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), mass);
   } else {
-    let rHoriz = length(pos.xz);
-    let azimAxis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-pos.z, 0.0, pos.x) / max(rHoriz, 1e-4), rHoriz > 1e-3);
-    let sheetCross = cross(stretch, azimAxis);
-    let sheetNorm = select(azimAxis, sheetCross / max(length(sheetCross), 1e-5), length(sheetCross) > 1e-4);
-    let sheetSpan = clamp(length(stretch) * 0.38, 0.0, 0.0056) * smoothstep(0.014, 0.064, rHoriz);
+    let stretchXZLen = length(stretch.xz);
+    let horizTangent = select(
+      vec3<f32>(1.0, 0.0, 0.0),
+      vec3<f32>(-stretch.z, 0.0, stretch.x) / max(stretchXZLen, 1e-5),
+      stretchXZLen > 1e-4
+    );
+    let sheetCross = cross(stretch, horizTangent);
+    let crossChoice = select(horizTangent, sheetCross / max(length(sheetCross), 1e-5), length(sheetCross) > 1e-4);
+    let horizMix = smoothstep(0.35, 0.85, abs(stretch.y) / max(sLenNow, 1e-5));
+    let sheetNorm = normalize(mix(crossChoice, horizTangent, horizMix));
+    let sheetSpan = clamp(sLenNow * 0.62, 0.0032, 0.0085);
     let sheetVec = sheetNorm * sheetSpan;
 
     let uvw0 = clamp(worldToUVW(pos - 0.42 * stretch, u), vec3<f32>(0.002), vec3<f32>(0.998));

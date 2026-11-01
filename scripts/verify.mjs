@@ -16,6 +16,7 @@ const OUT_DIR = path.join(ROOT_DIR, '.verify-out');
 
 const QUICK = process.argv.includes('--quick');
 const PRESET_MATRIX = process.argv.includes('--preset-matrix');
+const LIVE_AUDIT = process.argv.includes('--live-audit');
 const DEV_PORT = 5179;
 const CDP_PORT = 9234 + (process.pid % 400);
 const APP_URL = `http://localhost:${DEV_PORT}/?zen=1`;
@@ -287,6 +288,136 @@ async function runPresetMatrix(cdp, snap) {
   return { heroSubState, crownHold, sheets: [sheet1, sheet2] };
 }
 
+async function runLiveExplorationAudit(cdp, snap) {
+  // 1. Quick click pipette squeeze + XDR extended-sRGB midtone parity & specular headroom
+  const quickClickState = await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.setLightingMode(0);
+    eng.setCameraPreset('hero', true);
+    eng.resetSimulation(1.0);
+    eng.multiDrops.clearSlot(eng.multiDrops.slots[0]);
+    const rect = eng.canvas.getBoundingClientRect();
+    const cx = rect.left + rect.width * 0.50;
+    const cy = rect.top + rect.height * 0.46;
+    eng.canvas.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, clientX: cx, clientY: cy, pointerId: 2, pointerType: 'mouse', button: 0
+    }));
+    window.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, clientX: cx, clientY: cy, pointerId: 2, pointerType: 'mouse', button: 0
+    }));
+    eng.paused = false;
+    for (let i = 0; i < 6; i++) {
+      window.__REAL_RENDER_FRAME__(1 / 60);
+    }
+    eng.paused = true;
+    eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
+    const activeSlot = eng.multiDrops.slots.find((s) => s.active);
+    return {
+      mode: activeSlot?.mode ?? 'none',
+      centerY: activeSlot ? +activeSlot.center[1].toFixed(4) : null,
+      pipettePresence: activeSlot ? +activeSlot.pipettePresence.toFixed(3) : 0,
+    };
+  })()`);
+  await snap('lv_00_quick_pipette_squeeze.png');
+  const xdrCheck = await cdp.eval('window.__QA__.verifyExtendedHdrToggle()');
+
+  // 2. Settling ripples decay monotonically without inward drumhead sonar bounce or red clear-water sweep
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.setLightingMode(0);
+    eng.setCameraPreset('hero', true);
+    eng.resetSimulation(1.0);
+    await eng.seekToSimTime(2.00, 1.0);
+    eng.camera.syncHeroFollow(2.00, true);
+    eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
+  })()`);
+  const wave2p0 = await cdp.eval('window.__QA__.readWaveStats()');
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    await eng.seekToSimTime(3.20, 1.0);
+  })()`);
+  const wave3p2 = await cdp.eval('window.__QA__.readWaveStats()');
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    await eng.seekToSimTime(4.20, 1.0);
+    eng.camera.syncHeroFollow(4.20, true);
+    eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
+  })()`);
+  const wave4p2 = await cdp.eval('window.__QA__.readWaveStats()');
+  await snap('lv_01_settling_ripples_t4p2s.png', { checkClearOuterRipples: true });
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    await eng.seekToSimTime(5.40, 1.0);
+  })()`);
+  const wave5p4 = await cdp.eval('window.__QA__.readWaveStats()');
+
+  // 3. Multi-drop organic plume unfurling (3 drops across [-0.27, -0.01, +0.26] at t = 8.5s)
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.setLightingMode(0);
+    eng.setCameraPreset('hero', true);
+    eng.resetSimulation(1.3);
+    eng.multiDrops.clearSlot(eng.multiDrops.slots[0]);
+    eng.triggerQuickPipetteDrop([-0.27, 0.03], 0.056);
+    await eng.seekToSimTime(1.45, 1.3);
+    eng.triggerQuickPipetteDrop([-0.01, -0.02], 0.060);
+    await eng.seekToSimTime(2.90, 1.3);
+    eng.triggerQuickPipetteDrop([0.26, 0.04], 0.054);
+    await eng.seekToSimTime(8.50, 1.3);
+    window.__QA__.setCam(0.04, 0.24, 1.58, [0.0, -0.14, 0.0]);
+  })()`);
+  await snap('lv_02_multi_drop_plumes_t8p5s.png');
+
+  // 4. Post-11s aging & hemolysis (t = 19.0s -> zero olive/chartreuse yellow-green streaks!)
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    await eng.seekToSimTime(19.00, 1.3);
+    window.__QA__.setCam(0.04, 0.22, 1.56, [0.0, -0.22, 0.0]);
+  })()`);
+  await snap('lv_03_aging_hemolysis_t19s.png');
+
+  // 5. Low floor orbit & borosilicate glass cuvette base (clamped above y = -0.88, flat crimson sediment)
+  const floorOrbitState = await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    await eng.seekToSimTime(21.50, 1.3);
+    window.__QA__.setCam(0.28, -0.22, 1.48, [0.0, -0.52, 0.0]);
+    eng.camera.orbit(0.0, -6.0);
+    eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
+    return {
+      camPosY: +eng.camera.position[1].toFixed(4),
+      camElev: +eng.camera.elevation.toFixed(4),
+    };
+  })()`);
+  await snap('lv_04_cuvette_floor_orbit.png');
+
+  // 6. Side-on eye-level aquarium view at t = 2.30s (full 3D vortex plume through vertical cuvette wall, not 11px sliver!)
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.setLightingMode(0);
+    eng.resetSimulation(1.0);
+    await eng.seekToSimTime(2.30, 1.0);
+    window.__QA__.setCam(0.42, 0.03, 1.44, [0.0, -0.04, 0.0]);
+  })()`);
+  await snap('lv_05_sideon_aquarium_t2p3s.png');
+
+  const sheet = await buildContactSheet(cdp, 'live_fixes_sheet.jpg', 3, 2, [
+    { file: 'lv_00_quick_pipette_squeeze.png', label: '1. Quick Pipette Squeeze + XDR sRGB' },
+    { file: 'lv_01_settling_ripples_t4p2s.png', label: '5. Settling Ripples (0 Red Sonar Echo)' },
+    { file: 'lv_02_multi_drop_plumes_t8p5s.png', label: '2. 3-Drop Unfurling Curtains (t=8.5s)' },
+    { file: 'lv_03_aging_hemolysis_t19s.png', label: '3. Aged Hemolysis t=19s (0 Green Streaks)' },
+    { file: 'lv_04_cuvette_floor_orbit.png', label: '4A. Cuvette Glass Base + Flat Sediment' },
+    { file: 'lv_05_sideon_aquarium_t2p3s.png', label: '4C. Side-On Aquarium View (t=2.3s)' },
+  ]);
+
+  return {
+    quickClickState,
+    xdrCheck,
+    waveDecay: { wave2p0, wave3p2, wave4p2, wave5p4 },
+    floorOrbitState,
+    sheet,
+  };
+}
+
 async function main() {
   const devServer = await ensureDevServer();
   const chrome = spawn(
@@ -460,9 +591,10 @@ async function main() {
           await waveReadBuf.mapAsync(GPUMapMode.READ);
           const f = new Float32Array(waveReadBuf.getMappedRange().slice(0));
           waveReadBuf.unmap();
-          let minEta = Infinity, maxEta = -Infinity, maxSlope = 0;
+          let minEta = Infinity, maxEta = -Infinity, maxSlope = 0, sumE2 = 0;
           for (let i = 0; i < 64; i++) {
             const e = f[i * 4];
+            sumE2 += e * e;
             if (e < minEta) minEta = e;
             if (e > maxEta) maxEta = e;
             if (i > 0) {
@@ -474,6 +606,7 @@ async function main() {
             centerEta: +f[0].toFixed(5),
             minEta: +minEta.toFixed(5),
             maxEta: +maxEta.toFixed(5),
+            rmsEta: +Math.sqrt(sumE2 / 64).toFixed(6),
             maxSlope: +maxSlope.toFixed(4),
           };
         },
@@ -563,13 +696,18 @@ async function main() {
           let whiteEyeballCutoutPx = 0;
           let muddyYellowTanSmokePx = 0;
           let magentaWaterRipplePx = 0;
+          let yellowGreenStreakPx = 0;
+          let clearWaterRedRipplePx = 0;
           let upperHalfBloodPx = 0;
           let lowerHalfBloodPx = 0;
+          let minBloodY = h;
+          let maxBloodY = -1;
 
           const isShallowUnderwater = Boolean(opts.isShallowUnderwater);
           const isDarkField = Boolean(opts.isDarkField);
           const checkStem = Boolean(opts.checkStemContinuity);
           const checkOblate = Boolean(opts.checkBottomOblateness);
+          const checkClearOuterRipples = Boolean(opts.checkClearOuterRipples);
           const rowBloodCounts = checkStem ? new Int32Array(h) : null;
           const xStemMin = Math.round(w * 0.25);
           const xStemMax = Math.round(w * 0.75);
@@ -592,9 +730,10 @@ async function main() {
                 const lb = rawF16[j + 2];
                 const pk = Math.max(lr, lg, lb);
                 if (pk > maxHdrLinearPeak) maxHdrLinearPeak = pk;
-                r = linToSrgbByte(lr);
-                g = linToSrgbByte(lg);
-                b = linToSrgbByte(lb);
+                // rgba16float swapchain uses extended-sRGB transfer directly on [0, 1]
+                r = Math.round(Math.min(1, Math.max(0, lr)) * 255);
+                g = Math.round(Math.min(1, Math.max(0, lg)) * 255);
+                b = Math.round(Math.min(1, Math.max(0, lb)) * 255);
               } else {
                 const i = row + x * 4;
                 r = isBGRA ? raw[i + 2] : raw[i + 0];
@@ -611,6 +750,20 @@ async function main() {
               if (isDarkField && y < h * 0.34 && r > 70 && b > 65 && b > g + 10 && r > g + 12 && r < b * 1.55) {
                 magentaWaterRipplePx++;
               }
+              if (!isDarkField && g >= 48 && g > r + 6 && g > b + 6) {
+                yellowGreenStreakPx++;
+              }
+              if (
+                checkClearOuterRipples &&
+                y > h * 0.14 &&
+                y < h * 0.36 &&
+                Math.abs(x - 0.5 * w) > 0.18 * w &&
+                Math.abs(x - 0.5 * w) < 0.40 * w
+              ) {
+                if (r > b + 8 || r > g + 14) {
+                  clearWaterRedRipplePx++;
+                }
+              }
 
               const isBlood = isDarkField
                 ? (r >= 16 && r > g * 1.28 && r > b * 1.55)
@@ -619,6 +772,10 @@ async function main() {
               if (isBlood) {
                 if (y < h * 0.46) upperHalfBloodPx++;
                 else lowerHalfBloodPx++;
+                if (x > w * 0.15 && x < w * 0.85) {
+                  if (y < minBloodY) minBloodY = y;
+                  if (y > maxBloodY) maxBloodY = y;
+                }
               }
 
               if (isBlood && (checkStem || checkOblate) && x >= xStemMin && x <= xStemMax) {
@@ -693,6 +850,9 @@ async function main() {
             whiteEyeballCutoutPx,
             muddyYellowTanSmokePx,
             magentaWaterRipplePx,
+            yellowGreenStreakPx,
+            clearWaterRedRipplePx,
+            plumeVerticalSpanPx: maxBloodY >= minBloodY ? maxBloodY - minBloodY : 0,
             upperToLowerBloodRatio: lowerHalfBloodPx > 0 ? +(upperHalfBloodPx / lowerHalfBloodPx).toFixed(3) : 0,
             stemContinuity,
             bottomOblateness,
@@ -701,10 +861,45 @@ async function main() {
 
         async verifyExtendedHdrToggle() {
           const wasHdr = eng.isExtendedHdr;
+          // 1. Capture SDR reference on identical frame (with an aerial drop softbox glint in view so >0.78 speculars exist)
+          eng.setExtendedHdr(false);
+          const sdrFormat = eng.format;
+          const isSdrBGRA = sdrFormat.startsWith('bgra');
+          const sdrBytesPerRow = Math.ceil((w * 4) / 256) * 256;
+          const sdrTex = eng.device.createTexture({
+            size: [w, h, 1],
+            format: sdrFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+          });
+          const sdrBuf = eng.device.createBuffer({
+            size: sdrBytesPerRow * h,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+          await new Promise((resolve) => {
+            requestAnimationFrame(() => {
+              eng.uploadSnapshotUniforms(0.0, eng.spawnCursor, 0);
+              const enc = eng.device.createCommandEncoder();
+              eng.encodeOpticalRenderPasses(enc, sdrTex.createView());
+              enc.copyTextureToBuffer(
+                { texture: sdrTex },
+                { buffer: sdrBuf, bytesPerRow: sdrBytesPerRow, rowsPerImage: h },
+                [w, h, 1]
+              );
+              eng.device.queue.submit([enc.finish()]);
+              resolve();
+            });
+          });
+          await sdrBuf.mapAsync(GPUMapMode.READ);
+          const sdrU8 = new Uint8Array(sdrBuf.getMappedRange()).slice();
+          sdrBuf.unmap();
+          sdrTex.destroy();
+          sdrBuf.destroy();
+
+          // 2. Capture HDR extended-sRGB on the exact same scene
           eng.setExtendedHdr(true);
           if (!eng.isExtendedHdr || eng.format !== 'rgba16float') {
             eng.setExtendedHdr(wasHdr);
-            return { supported: false, maxHdrLinearPeak: 0, hdrSuperWhitePx: 0 };
+            return { supported: false, maxHdrLinearPeak: 0, hdrSuperWhitePx: 0, maxMidtoneSdrDiff: 999 };
           }
           const hdrBytesPerRow = Math.ceil((w * 8) / 256) * 256;
           const hdrTex = eng.device.createTexture({
@@ -737,13 +932,24 @@ async function main() {
           const stride = hdrBytesPerRow >> 1;
           let maxPeak = 0;
           let hdrSuperWhitePx = 0;
-          for (let y = 0; y < h; y++) {
+          let maxMidtoneSdrDiff = 0;
+          for (let y = 0; y < h; y += 2) {
             const row = y * stride;
-            for (let x = 0; x < w; x++) {
+            const sRow = y * sdrBytesPerRow;
+            for (let x = 0; x < w; x += 2) {
               const j = row + x * 4;
               const pk = Math.max(f16[j], f16[j + 1], f16[j + 2]);
               if (pk > maxPeak) maxPeak = pk;
               if (pk > 1.001) hdrSuperWhitePx++;
+              const si = sRow + x * 4;
+              const sr = (isSdrBGRA ? sdrU8[si + 2] : sdrU8[si + 0]) / 255;
+              const sg = sdrU8[si + 1] / 255;
+              const sb = (isSdrBGRA ? sdrU8[si + 0] : sdrU8[si + 2]) / 255;
+              const sMax = Math.max(sr, sg, sb);
+              if (sMax >= 0.05 && sMax <= 0.78) {
+                const d = Math.max(Math.abs(f16[j] - sr), Math.abs(f16[j + 1] - sg), Math.abs(f16[j + 2] - sb));
+                if (d > maxMidtoneSdrDiff) maxMidtoneSdrDiff = d;
+              }
             }
           }
           hdrBuf.unmap();
@@ -755,6 +961,7 @@ async function main() {
             supported: true,
             maxHdrLinearPeak: +maxPeak.toFixed(4),
             hdrSuperWhitePx,
+            maxMidtoneSdrDiff: +maxMidtoneSdrDiff.toFixed(4),
             restoredFormat: eng.format,
             validationErrors: eng.validationErrors.length,
           };
@@ -804,6 +1011,40 @@ async function main() {
         `Captured ${filename}: upper/lowerBlood=${metrics.upperToLowerBloodRatio}, eyeball=${metrics.whiteEyeballCutoutPx}, smoke=${metrics.muddyYellowTanSmokePx}`
       );
       return outPath;
+    }
+
+    if (LIVE_AUDIT) {
+      const lvResult = await runLiveExplorationAudit(cdp, snap);
+      const byLv = Object.fromEntries(captures.map((c) => [c.filename, c.metrics]));
+      const lvFailures = [];
+      if (!lvResult.xdrCheck?.supported || lvResult.xdrCheck.maxMidtoneSdrDiff > 0.015 || lvResult.xdrCheck.maxHdrLinearPeak <= 1.0) {
+        lvFailures.push(`XDR extended-sRGB parity/headroom failed: ${JSON.stringify(lvResult.xdrCheck)}`);
+      }
+      if (lvResult.quickClickState.pipettePresence < 0.85) {
+        lvFailures.push(`Quick click did not squeeze from pipette tip: ${JSON.stringify(lvResult.quickClickState)}`);
+      }
+      if ((byLv['lv_01_settling_ripples_t4p2s.png']?.clearWaterRedRipplePx ?? 999) > 20) {
+        lvFailures.push(`Settling outer ripples showed red sonar tint: ${JSON.stringify(byLv['lv_01_settling_ripples_t4p2s.png'])}`);
+      }
+      if (lvResult.waveDecay.wave5p4.rmsEta >= lvResult.waveDecay.wave2p0.rmsEta * 0.45) {
+        lvFailures.push(`Wave radial decay failed (sonar echo): ${JSON.stringify(lvResult.waveDecay)}`);
+      }
+      if ((byLv['lv_03_aging_hemolysis_t19s.png']?.yellowGreenStreakPx ?? 999) > 0) {
+        lvFailures.push(`Post-11s yellow-green streaks detected: ${JSON.stringify(byLv['lv_03_aging_hemolysis_t19s.png'])}`);
+      }
+      if (lvResult.floorOrbitState.camPosY < -0.885) {
+        lvFailures.push(`Camera orbited below cuvette floor: ${JSON.stringify(lvResult.floorOrbitState)}`);
+      }
+      if ((byLv['lv_05_sideon_aquarium_t2p3s.png']?.plumeVerticalSpanPx ?? 0) < 140) {
+        lvFailures.push(`Side-on aquarium view flattened plume into sliver: ${JSON.stringify(byLv['lv_05_sideon_aquarium_t2p3s.png'])}`);
+      }
+      writeOut('live_audit_metrics.json', JSON.stringify({ initInfo, ...lvResult, lvFailures, captures }, null, 2));
+      if (lvFailures.length > 0) {
+        throw new Error('Live Exploration Audit Gate Failures:\n' + lvFailures.join('\n'));
+      }
+      console.log('LIVE EXPLORATION AUDIT PASSED:', JSON.stringify(lvResult, null, 2));
+      ws.close();
+      return;
     }
 
     if (PRESET_MATRIX) {
@@ -881,10 +1122,12 @@ async function main() {
 
     const profiles = [];
     let pmFullResult = null;
+    let lvFullResult = null;
     if (!QUICK) {
       await cdp.send('Page.bringToFront');
       profiles.push(await cdp.eval(`window.__QA__.profile60Frames('dichromatic_vortex_plume')`));
       pmFullResult = await runPresetMatrix(cdp, snap);
+      lvFullResult = await runLiveExplorationAudit(cdp, snap);
     }
 
     await cdp.eval(`(async () => {
@@ -930,8 +1173,22 @@ async function main() {
         gateFailures.push(`${f} bottomOblateness failed: ${JSON.stringify(byFile[f]?.bottomOblateness)}`);
       }
     }
-    if (!hdrExtendedCheck?.supported || hdrExtendedCheck.maxHdrLinearPeak <= 1.0) {
+    if (!hdrExtendedCheck?.supported || hdrExtendedCheck.maxHdrLinearPeak <= 1.0 || hdrExtendedCheck.maxMidtoneSdrDiff > 0.015) {
       gateFailures.push(`XDR rgba16float extended check failed: ${JSON.stringify(hdrExtendedCheck)}`);
+    }
+    if (lvFullResult) {
+      if ((byFile['lv_01_settling_ripples_t4p2s.png']?.clearWaterRedRipplePx ?? 999) > 20) {
+        gateFailures.push(`Settling outer ripples showed red sonar tint: ${JSON.stringify(byFile['lv_01_settling_ripples_t4p2s.png'])}`);
+      }
+      if (lvFullResult.waveDecay.wave5p4.rmsEta >= lvFullResult.waveDecay.wave2p0.rmsEta * 0.45) {
+        gateFailures.push(`Wave radial decay failed (sonar echo): ${JSON.stringify(lvFullResult.waveDecay)}`);
+      }
+      if ((byFile['lv_03_aging_hemolysis_t19s.png']?.yellowGreenStreakPx ?? 999) > 0) {
+        gateFailures.push(`Post-11s yellow-green streaks detected: ${JSON.stringify(byFile['lv_03_aging_hemolysis_t19s.png'])}`);
+      }
+      if ((byFile['lv_05_sideon_aquarium_t2p3s.png']?.plumeVerticalSpanPx ?? 0) < 140) {
+        gateFailures.push(`Side-on aquarium view flattened plume into sliver: ${JSON.stringify(byFile['lv_05_sideon_aquarium_t2p3s.png'])}`);
+      }
     }
     if (pmFullResult) {
       if (pmFullResult.heroSubState.camPosY <= 0.30 || pmFullResult.heroSubState.camElev <= 0.20) {

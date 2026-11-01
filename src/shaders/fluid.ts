@@ -484,6 +484,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mac.y = mac.y + buoyAccel * dt;
   }
 
+  // 4. Deep-column secondary baroclinic unfurling (active strictly >18 cm below meniscus so early toroidal roll-up
+  //    and upper stem stay crisp while each plume's lower skirt unfurls into unique asymmetric curtains rather than identical apples!)
+  let pCell = uvwToWorld(uvwCell, u);
+  let depthBelow = u.surfaceParams.x - pCell.y;
+  let unfurlGate = smoothstep(0.18, 0.52, depthBelow) * smoothstep(0.0015, 0.018, cRbc);
+  if (unfurlGate > 0.001) {
+    let tSwirl = u.cameraPosAndTime.w * 0.34 + u.particleParams.x * 1.7;
+    // Divergence-free horizontal streamfunction psi(x, y, z) -> v_horiz = (dpsi/dz, 0, -dpsi/dx)
+    let q1 = pCell.x * 9.3 + pCell.z * 6.7 + pCell.y * 5.1 + tSwirl;
+    let q2 = pCell.z * 11.1 - pCell.x * 7.9 + pCell.y * 6.3 - tSwirl * 0.77;
+    let swirlX = (6.7 * cos(q1) + 11.1 * cos(q2)) * 0.0024 * unfurlGate;
+    let swirlZ = -(9.3 * cos(q1) - 7.9 * cos(q2)) * 0.0024 * unfurlGate;
+    mac.x = mac.x + swirlX * dt;
+    mac.z = mac.z + swirlZ * dt;
+  }
+
   mac = clamp(mac, vec3<f32>(-1.8), vec3<f32>(1.8));
   if (ix >= ${VEL_GRID_X - 1}) { mac.x = 0.0; }
   if (iz >= ${VEL_GRID_Z - 1}) { mac.z = 0.0; }

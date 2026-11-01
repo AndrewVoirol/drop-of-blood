@@ -4,11 +4,12 @@
 
 1. **Mandatory Turn-0 Skill Read**: Read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simulation/SKILL.md` before designing, editing, or delegating any shader, fluid, camera, or verification work.
 2. **Core Commands**:
-   - **Unit Tests (`45/45`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
+   - **Unit Tests (`46/46`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
    - **Static WGSL AST, Struct Alignment & Control-Flow Lint**: `npm run lint:wgsl`
    - **Symbol Line-Number Indexer (Before Reading Monoliths)**: `npm run map:symbols -- <keyword>`
    - **Typecheck + Production Bundle (`TS 7` + `Vite 8` Rolldown)**: `npm run build`
    - **Real User Preset + DOM Hold + Unpaused Temporal Strip (`~12 s`)**: `node scripts/verify.mjs --preset-matrix` (outputs stitched `.verify-out/preset_matrix_sheet.jpg` and `.verify-out/temporal_entry_strip.jpg`)
+   - **Live Exploration Audit (`XDR` + Pipette Squeeze + Wave Decay + Hemolysis + Cuvette + Side View)**: `node scripts/verify.mjs --live-audit` (outputs stitched `.verify-out/live_fixes_sheet.jpg`)
    - **Fast 4-Shot Regression + `1:1` Crops (`~10 s`)**: `node scripts/verify.mjs --quick`
    - **Full Regression + `60`-Frame Metal GPU Latency Gate**: `node scripts/verify.mjs`
 3. **Iteration & Git Discipline**:
@@ -50,7 +51,7 @@ Every visual change MUST be verified through these actual user presets, never so
 - **Two-Stage Optical Pipeline ([`src/shaders/render.ts`](src/shaders/render.ts))**:
   - Half-res volumetric pass (`1088 × 680` `volTex`: `.rgb` linear radiance, `.a` ray hit distance `tSurf`).
   - `1:1` Retina `COMPOSITE_WGSL` (`2560 × 1600`): perspective-detrended `volTex.a - tFlat` bilateral upsampling + native `1:1` foreground turbid whole-blood aerial/pendant drop intersection + meniscus speculars.
-  - **Apple Silicon XDR / EDR Swapchain (`override HDR_EXTENDED`)**: Pre-compiles `pCompositeSdr` (`bgra8unorm`, IEC `linearToSRGB`) and `pCompositeHdr` (`rgba16float`, `toneMapping: { mode: 'extended' }`, linear extended-sRGB matching SDR 1:1 across `[0, 0.76]` with specular headroom `> 1.0` above `0.76`), switched dynamically via `window.matchMedia('(dynamic-range: high)')` or `engine.setExtendedHdr(boolean)`.
+  - **Apple Silicon XDR / EDR Swapchain (`override HDR_EXTENDED`)**: Pre-compiles `pCompositeSdr` (`bgra8unorm`, IEC `linearToSRGB`) and `pCompositeHdr` (`rgba16float`, `toneMapping: { mode: 'extended' }`, `srgb + edrBoost` matching SDR midtones 1:1 with `maxMidtoneSdrDiff <= 0.015` across `[0.05, 0.78]` while opening `> 1.0` specular headroom above linear `0.78`), switched dynamically via `window.matchMedia('(dynamic-range: high)')` or `engine.setExtendedHdr(boolean)`. Never return raw linear `mapped + edrBoost` to an extended-sRGB swapchain (macOS expects piecewise sRGB transfer across `[0, 1]` and otherwise crushes midtones ~`3x` dark).
   - **Hardware `timestamp-query` 5-Pass Telemetry**: When `adapter.features.has('timestamp-query')`, `BloodDropEngine` resolves per-pass GPU durations into `engine.gpuPassTimingsMs` (`macAndWaveMs`, `parcelAndConcMs`, `lightingAndBricksMs`, `halfResVolumetricMs`, `retinaCompositeMs`, `totalGpuMs`) via double-buffered 80-byte readback (`engine.getWorkbenchAdapter()`).
 - **Hard Regression Invariants Across All 4 Optical Regimes** (`Bright-Field Topside`, `Dark-Field Topside`, `Sub-Meniscus TIR`, `Steep Snell's Window`):
   - Unbroken vertical stem continuity (`emptyGapScanlines === 0`).
@@ -61,14 +62,19 @@ Every visual change MUST be verified through these actual user presets, never so
 
 ---
 
-## 3. Physical-Realism Guardrails (Round 9 Contracts)
+## 3. Physical-Realism Guardrails (Round 9 & Round 10 Contracts)
 
-1. **Turbid Whole-Blood Aerial & Pendant Drops ([`src/shaders/render.ts`](src/shaders/render.ts), [`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts))**:
-   - Whole human blood (`Hct ~ 45%`, $n \approx 1.378$, erythrocyte Mie $\mu_s' \approx 2.2\text{ mm}^{-1}$) extinguishes ballistic background sky transmission exponentially (`ballisticTrans = exp(-chord * 92.0 * ...)` `< 0.05%` in core) so `3–4 mm` drops read as opaque dark oxblood in the core with ruby translucency restricted to `< 0.5 mm` rims and capillary pinch-off necks—never refracting `88%` of the backdrop upside-down like a glass marble.
-   - Specular reflections evaluate extended rectangular studio softbox strip windows (`evalDropStudioWindowSpec`) weighted by physical dielectric Fresnel ($F_0 \approx 0.025$), never circular Phong point dots (`pow(..., 150)`), paired with Rayleigh–Lamb $l = 2, 3$ capillary shape oscillations and crisp (`~0.12 s`) inertial crater plunge.
-2. **Capillary–Gravity Ripples & Continuous Wet Meniscus Gloss ([`src/shaders/wave.ts`](src/shaders/wave.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
-   - Drive the `5.47 mm`-cell FFT PDE with a single momentum-coupled cavity + wetting-line capillary impulse at each drop's true `dropXZ` (zero delayed `reboundImpulse` double-pistons, zero `(0, 0)` origin-locked `normalize(pRipple.xz)` or grey `slopeContrast` / `rippleRelief` bands).
-   - Preserve continuous dielectric Fresnel reflection and Retina capillary speculars over `bloodInColumn` so submerged blood reads beneath glossy liquid rather than as a dry red coin on top.
-3. **Topside `Follow` Trajectory & Wave-Warped `Sub-Meniscus` TIR ([`src/math/camera.ts`](src/math/camera.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
+1. **Turbid Whole-Blood Aerial & Pendant Drops + Quick Pipette Squeeze ([`src/shaders/render.ts`](src/shaders/render.ts), [`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts))**:
+   - Whole human blood (`Hct ~ 45%`, $n \approx 1.378$, erythrocyte Mie $\mu_s' \approx 2.2\text{ mm}^{-1}$) extinguishes ballistic background sky transmission exponentially (`ballisticTrans = exp(-chord * 92.0 * ...)` `< 0.05%` in core) so `3–4 mm` drops read as warm dark oxblood in the core with ruby translucency restricted to `< 0.5 mm` rims and capillary pinch-off necks—never refracting `88%` of the backdrop upside-down like a glass marble.
+   - Both quick clicks (`< 160 ms`) and `+ Drop` (`beginQuickPipetteDrop`) squeeze briskly (`~0.15 s`) from the borosilicate Pasteur pipette tip (`PIPETTE_TIP_Y = +0.55`) rather than spawning detached spheres in empty mid-air.
+   - Specular reflections evaluate extended rectangular studio softbox strip windows (`evalDropStudioWindowSpec`) weighted by physical dielectric Fresnel ($F_0 \approx 0.025$), never circular Phong point dots (`pow(..., 150)`), paired with Rayleigh–Lamb $l = 2, 3$ capillary shape oscillations and smooth (`plungeFade`) crater coalescence handoff.
+2. **Non-Reflecting Cuvette Wave Absorber & Zero Red "Sonar" Sweep ([`src/shaders/wave.ts`](src/shaders/wave.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
+   - Drive the `5.47 mm`-cell FFT PDE with a single momentum-coupled cavity + wetting-line capillary impulse at each drop's true `dropXZ`, damped outside the cuvette (`|x|, |z| > 0.50`) by a square Rayleigh velocity absorber (`rayleighDamp`) + physical viscous decay (`viscRate = 0.56 + 0.00018 * k2`) + drainage-gated `forceSubsurface` (`subsurfGate`)—never a pinned circular `eta * sponge` ring that bounces drumhead echoes inward.
+   - Gate meniscus blood tinting & swell-throat lensing strictly by `surfaceBloodContact` (`surfBlood`) and keep `plumeGlareDamp` / `clearWaterReliefGate` independent of `activeCurve` (`clearWaterRedRipplePx === 0`) so clear-water ripples over submerged plumes never pulse red or wash oxblood cores into grey discs.
+3. **Organic Unfurling, Rose-Ruby Hemolysis & Borosilicate Glass Cuvette ([`src/shaders/particles.ts`](src/shaders/particles.ts), [`src/shaders/advect.ts`](src/shaders/advect.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
+   - Keep Stokes settling continuous across age (`stackSettle <= 0.062`, zero `0.165` O-ring cliff), coalesce unstretched core parcels (`sLenNow < 0.0038`) into single trilinear splats (`4x` lower atomic contention) while splatting origin-independent 2D tangent sheets on stretched shoulders + occupied-only `lapIntact` (`rawIntact > 0u` after empty-voxel early return), and add deep (`depthBelow > 0.18`) divergence-free curl unfurling.
+   - Enforce `gRoseGuard` across diluted/hemolyzed trails (`yellowGreenStreakPx === 0`) so `430 nm` Soret absorption never filters cool blue studio water into `G > R` chartreuse streaks.
+   - Ground the water inside the rounded-square (`[-0.55, +0.55]`) borosilicate glass cuvette (`evalCuvetteFloorBackdrop` at `y = -0.98`, `camPos.y >= -0.88`, `iy <= 7` flat `cRouleauxBed`, flush front optical port), and gate horizontal meniscus Snell downward bending via `topSnellGate` so side-on aquarium views (`plumeVerticalSpanPx >= 140`) display the full 3D plume immediately.
+4. **Topside `Follow` Trajectory & Wave-Warped `Sub-Meniscus` TIR ([`src/math/camera.ts`](src/math/camera.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
    - Never auto-dive `syncHeroFollow` barely below `y = +0.30` into a grazing 50/50 TIR ceiling clone.
    - In `Sub-Meniscus` (`abyss`), keep `rPupil` at macro lens scale (`3.5–7.8 mm`) with un-crushed wave slopes and folded water-path attenuation (`tirFoldedAtten`) so underside reflections ripple and soften naturally rather than cloning the plume 1:1.

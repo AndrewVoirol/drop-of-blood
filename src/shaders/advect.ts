@@ -142,9 +142,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let flatIdx = u32((iz * ${CONC_GRID_Y} + iy) * ${CONC_GRID_X} + ix);
   let rawIntact = splatIntact[flatIdx];
   let rawLysed = splatLysed[flatIdx];
-  let inFloorZone = iy <= 18;
+  let inFloorZone = iy <= 7;
 
-  // Exact 2-tap hardware-trilinear octant positivity filter (extended to preserve floor rouleaux bed in iy <= 18)
+  // Exact 2-tap hardware-trilinear octant positivity filter (extended to preserve thin floor rouleaux bed in iy <= 7)
   if (rawIntact == 0u && rawLysed == 0u) {
     let oct0 = textureSampleLevel(concPredIn, linSampler, vec3<f32>(gid) / dims, 0.0).g;
     let oct1 = textureSampleLevel(concPredIn, linSampler, (vec3<f32>(gid) + 1.0) / dims, 0.0).g;
@@ -171,6 +171,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (!inFloorZone && rawIntact == 0u && rawLysed == 0u && gPred <= 1.2e-6 && lapNeighborsG <= 1.2e-6) {
     textureStore(concOut, vec3<i32>(ix, iy, iz), vec4<f32>(0.0));
     return;
+  }
+
+  var lapIntact = 0.0;
+  if (rawIntact > 0u) {
+    lapIntact = (
+      loadIntactRaw(ix + 1, iy, iz) +
+      loadIntactRaw(ix - 1, iy, iz) +
+      loadIntactRaw(ix, iy + 1, iz) +
+      loadIntactRaw(ix, iy - 1, iz) +
+      loadIntactRaw(ix, iy, iz + 1) +
+      loadIntactRaw(ix, iy, iz - 1)
+    ) * (1.0 / 6.0);
   }
 
   let uvw = (vec3<f32>(gid) + 0.5) / dims;
@@ -222,7 +234,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   // 2. Persistent Eulerian floor rouleaux coagulum pool (.a): captures settled & ring-wrapped floor RBCs
-  //    and slumps via viscous gravity-current horizontal spreading + smooth Boltzmann vertical settling (no shelf cliff!)
+  //    into a thin, smooth crimson sediment film resting flush on the y = -0.98 borosilicate glass floor!
   var cRouleauxBed = 0.0;
   if (inFloorZone) {
     let bCenter = loadOrigBed(vec3<i32>(ix, iy, iz));
@@ -234,25 +246,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let bAbove = loadOrigBed(vec3<i32>(ix, iy + 1, iz));
     let bBelow = loadOrigBed(vec3<i32>(ix, max(0, iy - 1), iz));
-    let spreadAlpha = clamp(dt * (0.95 + 3.2 * min(bCenter, 0.65)), 0.0, 0.055);
-    let vertDiffuse = clamp(dt * 0.95, 0.0, 0.032);
-    let settleAlpha = clamp(dt * 0.85, 0.0, 0.028);
+    let spreadAlpha = clamp(dt * (2.40 + 5.50 * min(bCenter, 0.65)), 0.0, 0.140);
+    let vertDiffuse = clamp(dt * 0.65, 0.0, 0.022);
+    let settleAlpha = clamp(dt * 2.80, 0.0, 0.090);
     let drainedSelf = select(bCenter * (1.0 - settleAlpha), bCenter, iy == 0);
-    let settledFromAbove = select(bAbove * settleAlpha, 0.0, iy >= 18);
+    let settledFromAbove = select(bAbove * settleAlpha, 0.0, iy >= 7);
     let advectedBed = drainedSelf + settledFromAbove;
     let smoothedBed = mix(mix(advectedBed, bHoriz, spreadAlpha), 0.5 * (bAbove + bBelow), vertDiffuse);
-    let topBedFade = 1.0 - 0.08 * smoothstep(13.0, 18.0, f32(iy));
+    let topBedFade = 1.0 - 0.35 * smoothstep(4.0, 7.0, f32(iy));
     cRouleauxBed = (smoothedBed + dmTransfer * floorBedCapture * 0.94) * topBedFade;
     if (cRouleauxBed < 1.0e-6) {
       cRouleauxBed = 0.0;
     }
   }
 
-  // 3. Reconstruct total intact erythrocyte + rouleaux density (.r) with lateral wall sponge ONLY (no yMin floor sponge!)
+  // 3. Reconstruct total intact erythrocyte + rouleaux density (.r) with mass-conserving sub-voxel shoulder smoothing
   let wallSponge = 1.0 - smoothstep(halfXZ * 0.88, halfXZ * 0.995, max(abs(p.x), abs(p.z)));
-  let maxBedProfile = 0.92 * exp(-0.18 * f32(iy));
+  let maxBedProfile = 0.88 * exp(-0.52 * f32(iy));
   cRouleauxBed = min(cRouleauxBed * wallSponge, maxBedProfile);
-  let cParcelIntact = (f32(rawIntact) * ${(1.0 / SPLAT_FP_SCALE).toExponential(8)}) * wallSponge;
+  let cParcelRaw = f32(rawIntact) * ${(1.0 / SPLAT_FP_SCALE).toExponential(8)};
+  let cParcelIntact = mix(cParcelRaw, lapIntact, 0.34) * wallSponge;
   let cIntact = cParcelIntact + cRouleauxBed;
   cLysed = cLysed * wallSponge;
 

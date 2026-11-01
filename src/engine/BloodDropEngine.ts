@@ -1569,6 +1569,44 @@ export class BloodDropEngine {
     return this.multiDrops.beginPendantDrop(xz, this.nextSeed());
   }
 
+  /**
+   * Squeezes and detaches a quick-clicked drop briskly (~0.15s) from the glass Pasteur pipette tip
+   * at PIPETTE_TIP_Y = +0.55 above the raycast meniscus coordinate (ndcX, ndcY).
+   */
+  public triggerQuickPipetteDropAtNdc(
+    ndcX: number,
+    ndcY: number,
+    radius?: number
+  ): DropSlotState | null {
+    if (this.destroyed) return null;
+    const xz = this.raycastCanvasNdcToMeniscus(ndcX, ndcY);
+    return this.triggerQuickPipetteDrop(xz, radius);
+  }
+
+  /**
+   * Squeezes and detaches an additional drop briskly (~0.15s) from the glass Pasteur pipette tip
+   * at PIPETTE_TIP_Y = +0.55 above offsetXZ without popping a bare sphere into mid-air.
+   */
+  public triggerQuickPipetteDrop(
+    offsetXZ: [number, number] = [0.0, 0.0],
+    radius?: number
+  ): DropSlotState | null {
+    if (this.destroyed) return null;
+    const seed = this.nextSeed();
+    const frac = (Math.sin(seed * 12.9898) * 43758.5453) % 1.0;
+    const unitFrac = frac < 0.0 ? frac + 1.0 : frac;
+    const pipetteRadius = radius ?? 0.053 + unitFrac * 0.010;
+    const slot = this.multiDrops.beginQuickPipetteDrop(offsetXZ, pipetteRadius, seed);
+    this.dropOffsetXZ[0] = slot.center[0];
+    this.dropOffsetXZ[1] = slot.center[2];
+    this.paused = false;
+    return slot;
+  }
+
+  public hasAutoSqueezePendantDrop(): boolean {
+    return this.multiDrops.hasAutoSqueezePendantDrop();
+  }
+
   public updatePendantDrop(dtRealSec: number): boolean {
     if (this.destroyed) return false;
     const pinchedOff = this.multiDrops.updatePendantDrop(dtRealSec);
@@ -2063,6 +2101,9 @@ export class BloodDropEngine {
     const batchSize = 6;
     for (let i = 0; i < stepsNeeded; i++) {
       this.frameIndex++;
+      if (this.hasAutoSqueezePendantDrop()) {
+        this.multiDrops.updatePendantDrop(FIXED_SIM_DT);
+      }
       const { packed, spawnCount } = this.advanceSubstepUniforms(FIXED_SIM_DT);
       this.device.queue.writeBuffer(this.uniformBuffer, 0, packed.buffer, 0, SIM_UNIFORM_BYTES);
 

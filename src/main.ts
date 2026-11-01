@@ -174,7 +174,7 @@ async function bootstrap(): Promise<void> {
           syncPlayButton();
         }
       } else {
-        engine.spawnDropAtNdc(gesture.ndcX, gesture.ndcY);
+        engine.triggerQuickPipetteDropAtNdc(gesture.ndcX, gesture.ndcY);
         syncPlayButton();
       }
     }
@@ -243,7 +243,7 @@ async function bootstrap(): Promise<void> {
   btnDrop?.addEventListener('click', () => {
     const jitterX = (Math.random() - 0.5) * 0.14;
     const jitterZ = (Math.random() - 0.5) * 0.14;
-    engine.triggerAdditionalDrop([jitterX, jitterZ]);
+    engine.triggerQuickPipetteDrop([jitterX, jitterZ]);
     syncPlayButton();
   });
 
@@ -291,7 +291,7 @@ async function bootstrap(): Promise<void> {
     } else if (e.key === 'd' || e.key === 'D') {
       const jitterX = (Math.random() - 0.5) * 0.14;
       const jitterZ = (Math.random() - 0.5) * 0.14;
-      engine.triggerAdditionalDrop([jitterX, jitterZ]);
+      engine.triggerQuickPipetteDrop([jitterX, jitterZ]);
       syncPlayButton();
     } else if (e.key === 'l' || e.key === 'L') {
       engine.setLightingMode(engine.config.lightingMode < 0.5);
@@ -354,6 +354,11 @@ async function bootstrap(): Promise<void> {
         if (pinched) {
           syncPlayButton();
         }
+      }
+    } else if (engine.hasAutoSqueezePendantDrop()) {
+      const pinched = engine.updatePendantDrop(dtSec);
+      if (pinched) {
+        syncPlayButton();
       }
     }
 

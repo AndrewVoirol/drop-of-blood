@@ -124,6 +124,8 @@ export interface DropSlotState {
   stepDrainedVolume: number;
   /** [0, 1] capillary pipette presence above this drop (1 while pendant, smoothly retracting after snap) */
   pipettePresence: number;
+  /** Target auto-pinch volume (> 0 when quick-clicked so the drop squeezes briskly from the glass pipette tip) */
+  autoReleaseVolume: number;
   seed: number;
 }
 
@@ -157,6 +159,7 @@ function createEmptySlot(): DropSlotState {
     volDrainRate: 0.0,
     stepDrainedVolume: 0.0,
     pipettePresence: 0.0,
+    autoReleaseVolume: 0.0,
     seed: 1.0,
   };
 }
@@ -211,6 +214,7 @@ export class MultiDropSystem {
     slot.volDrainRate = 0.0;
     slot.stepDrainedVolume = 0.0;
     slot.pipettePresence = 0.0;
+    slot.autoReleaseVolume = 0.0;
     slot.oscillation = 0.0;
     slot.oscBoost = 0.0;
   }
@@ -245,7 +249,8 @@ export class MultiDropSystem {
     for (let i = 0; i < MAX_ACTIVE_DROPS; i++) {
       this.clearSlot(this.slots[i]);
     }
-    this.spawnAerialDrop(offsetXZ, INITIAL_DROP_RADIUS, seed, Y_START, V_START);
+    const hero = this.spawnAerialDrop(offsetXZ, INITIAL_DROP_RADIUS, seed, Y_START, V_START);
+    hero.pipettePresence = 1.0;
     return this.buildSnapshot(0.0);
   }
 
@@ -283,6 +288,7 @@ export class MultiDropSystem {
     s.volDrainRate = 0.0;
     s.stepDrainedVolume = 0.0;
     s.pipettePresence = 0.0;
+    s.autoReleaseVolume = 0.0;
     s.seed = Math.max(0.5, Math.abs(seed));
     this.lastSpawnSimTime = this.simTime;
     return s;
@@ -294,7 +300,11 @@ export class MultiDropSystem {
    */
   public beginPendantDrop(offsetXZ: [number, number], seed = 1.0): DropSlotState {
     if (this.pendantSlotIndex >= 0 && this.slots[this.pendantSlotIndex].active) {
-      this.cancelPendantDrop();
+      if (this.slots[this.pendantSlotIndex].autoReleaseVolume > 0.0) {
+        this.releasePendantDrop();
+      } else {
+        this.cancelPendantDrop();
+      }
     }
     const idx = this.acquireSlotIndex();
     this.pendantSlotIndex = idx;
@@ -327,7 +337,23 @@ export class MultiDropSystem {
     s.volDrainRate = 0.0;
     s.stepDrainedVolume = 0.0;
     s.pipettePresence = 1.0;
+    s.autoReleaseVolume = 0.0;
     s.seed = Math.max(0.5, Math.abs(seed));
+    return s;
+  }
+
+  /**
+   * Begins a brisk (~0.15s) auto-squeezed pendant drop from the glass Pasteur pipette tip
+   * for quick clicks and '+ Drop' triggers so drops never pop out of thin air.
+   */
+  public beginQuickPipetteDrop(
+    offsetXZ: [number, number],
+    targetRadius = INITIAL_DROP_RADIUS,
+    seed = 1.0
+  ): DropSlotState {
+    const s = this.beginPendantDrop(offsetXZ, seed);
+    const rClamped = clamp(targetRadius, 0.030, PENDANT_MAX_RADIUS);
+    s.autoReleaseVolume = sphereVolume(rClamped);
     return s;
   }
 
@@ -348,9 +374,13 @@ export class MultiDropSystem {
     s.ageInPhase += dt;
 
     const vMin = sphereVolume(PENDANT_MIN_RADIUS);
-    const vMax = sphereVolume(PENDANT_MAX_RADIUS);
-    const volFrac = Math.min(1.0, s.ageInPhase / PENDANT_GROWTH_DURATION);
-    const nextVol = vMin + (vMax - vMin) * volFrac;
+    const isQuickSqueeze = s.autoReleaseVolume > 0.0;
+    const vTarget = isQuickSqueeze
+      ? Math.max(vMin + 1e-8, s.autoReleaseVolume)
+      : sphereVolume(PENDANT_MAX_RADIUS);
+    const squeezeDuration = isQuickSqueeze ? 0.15 : PENDANT_GROWTH_DURATION;
+    const volFrac = Math.min(1.0, s.ageInPhase / squeezeDuration);
+    const nextVol = vMin + (vTarget - vMin) * volFrac;
     const nextR = radiusFromVolume(nextVol);
 
     s.radius = nextR;
@@ -361,7 +391,7 @@ export class MultiDropSystem {
 
     // Young-Laplace bulb sag & concave capillary neck elongation strictly below PIPETTE_TIP_Y (0.55)
     const bondFrac = smoothstep(0.12, 1.0, volFrac);
-    const osc = 0.03 + 0.24 * bondFrac * bondFrac;
+    const osc = 0.03 + (isQuickSqueeze ? 0.14 : 0.24) * bondFrac * bondFrac;
     s.oscillation = osc;
     s.center[1] = PIPETTE_TIP_Y - nextR * (1.01 + osc) - 0.036 * bondFrac * bondFrac;
 
@@ -381,8 +411,10 @@ export class MultiDropSystem {
     this.pendantSlotIndex = -1;
     if (!s.active || s.mode !== 'pendant') return null;
 
+    const wasQuick = s.autoReleaseVolume > 0.0;
+    s.autoReleaseVolume = 0.0;
     s.mode = 'aerial';
-    s.vel[1] = -0.042; // Gentle downward detachment momentum after capillary neck snap
+    s.vel[1] = wasQuick ? -0.068 : -0.042; // Gentle downward detachment momentum after capillary neck snap
     s.ageInPhase = 0.0;
     s.oscBoost = 0.062; // Capillary neck-snap recoil exciting l=2,3 oscillations
     s.oscillation = evalRayleighOscillation(0.0, s.radius, s.seed, s.oscBoost);
@@ -408,6 +440,14 @@ export class MultiDropSystem {
 
   public hasActivePendantDrop(): boolean {
     return this.pendantSlotIndex >= 0 && this.slots[this.pendantSlotIndex].active;
+  }
+
+  public hasAutoSqueezePendantDrop(): boolean {
+    return (
+      this.pendantSlotIndex >= 0 &&
+      this.slots[this.pendantSlotIndex].active &&
+      this.slots[this.pendantSlotIndex].autoReleaseVolume > 0.0
+    );
   }
 
   private advanceCoalescingSlot(s: DropSlotState, dtSub: number): void {

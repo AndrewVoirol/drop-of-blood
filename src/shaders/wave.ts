@@ -6,8 +6,6 @@ import {
 } from './common';
 
 const WAVE_DOMAIN_LEN = (WAVE_HALF_EXTENT * 2.0).toFixed(4);
-const WAVE_SPONGE_INNER = (WAVE_HALF_EXTENT * 0.72).toFixed(4);
-const WAVE_SPONGE_OUTER = (WAVE_HALF_EXTENT * 0.96).toFixed(4);
 
 export const WAVE_CLEAR_WGSL = /* wgsl */ `
 ${COMMON_WGSL}
@@ -97,11 +95,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // 1. Multi-drop stagnation & wetting-neck crater excavation across all 8 concurrent drops
   var forceDrops = 0.0;
   var activeExcav = 0.0;
+  var maxDrain = 0.0;
   for (var d = 0u; d < ${MAX_ACTIVE_DROPS}u; d = d + 1u) {
     let slot = u.drops[d];
     let signedSeed = slot.velOscAndDrain.w;
     let drainRate = slot.velOscAndDrain.z;
     if (signedSeed > 0.0 && drainRate > 0.0005) {
+      maxDrain = max(maxDrain, drainRate);
       let dropXZ = slot.posAndRadius.xz;
       let rDrop = max(slot.posAndRadius.w, 0.018);
       let speedY = clamp(-slot.velOscAndDrain.x, 0.06, 0.65);
@@ -140,28 +140,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let effLapFilm = mix(max(lapFilm, -0.0015), lapFilm, activeExcav);
   let forceMarangoni = marangoniStr * 0.28 * effLapFilm;
   crimsonFilm = clamp(crimsonFilm + marangoniStr * 0.065 * lapFilm * timeScale, 0.0, 1.0);
-  crimsonFilm = crimsonFilm * pow(0.945, timeScale);
+  crimsonFilm = crimsonFilm * pow(0.88, timeScale);
 
-  // 3. Two-way 3D MAC subsurface upward feedback onto the free surface (decoupled from submerged stem wake drainage so craters rebound!)
+  // 3. Two-way 3D MAC subsurface upward feedback gated to active coalescence (preventing perpetual deep return-flow sonar rings!)
   var forceSubsurface = 0.0;
   let halfXZ = u.domainBounds.x;
-  if (abs(worldXZ.x) < halfXZ * 0.94 && abs(worldXZ.y) < halfXZ * 0.94) {
+  let subsurfGate = clamp(activeExcav * 1.4 + smoothstep(0.0, 0.06, maxDrain), 0.0, 1.0);
+  if (subsurfGate > 0.001 && abs(worldXZ.x) < halfXZ * 0.94 && abs(worldXZ.y) < halfXZ * 0.94) {
     let tankUV = (worldXZ + vec2<f32>(halfXZ)) / (2.0 * halfXZ);
     let topUVW = vec3<f32>(tankUV.x, 0.988, tankUV.y);
     let vSubY = textureSampleLevel(velMacIn, linSampler, topUVW, 0.0).y;
     let wallTaper = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, max(abs(worldXZ.x), abs(worldXZ.y)));
     let nonSuctionV = max(vSubY, 0.0);
-    forceSubsurface = clamp(nonSuctionV, 0.0, 0.48) * 0.46 * wallTaper;
+    forceSubsurface = clamp(nonSuctionV, 0.0, 0.48) * 0.42 * wallTaper * subsurfGate;
   }
 
   vel = vel + (forceDrops + forceMarangoni + forceSubsurface) * dt;
 
-  // Radial absorbing sponge prevents periodic wrap-around across the spectral box while keeping [-0.48, +0.48] tank unattenuated
-  let distOrigin = length(worldXZ);
-  let sponge = 1.0 - smoothstep(${WAVE_SPONGE_INNER}, ${WAVE_SPONGE_OUTER}, distOrigin);
-  eta = clamp(eta * sponge, -0.14, 0.14);
-  vel = clamp(vel * sponge, -1.8, 1.8);
-  crimsonFilm = crimsonFilm * sponge;
+  // Non-reflecting square Rayleigh velocity-damping absorber outside the cuvette (|x|,|z| > 0.50),
+  // eliminating the circular pinned-drumhead boundary that bounced sonar echoes radially back to (0, 0)!
+  let dBox = max(abs(worldXZ.x), abs(worldXZ.y));
+  let absorbZone = smoothstep(0.50, 0.692, dBox);
+  let rayleighDamp = exp(-dt * (24.0 * absorbZone * absorbZone));
+  let borderZero = 1.0 - smoothstep(0.665, 0.698, dBox);
+  eta = clamp(eta * mix(1.0, rayleighDamp, 0.50) * borderZero, -0.14, 0.14);
+  vel = clamp(vel * rayleighDamp * borderZero, -1.8, 1.8);
+  crimsonFilm = crimsonFilm * borderZero;
 
   textureStore(specOut, vec2<i32>(ix, iy), vec4<f32>(eta, vel, crimsonFilm, 0.0));
 }
@@ -294,8 +298,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let sigmaOverRho = 0.0024;
   let omega = sqrt(max((gEff * k + sigmaOverRho * k * k2) * tanhKH, 1e-8));
 
-  // Physical slow-motion viscous capillary damping + smooth high-k spectral de-aliasing roll-off near k_Nyquist = 574
-  let viscRate = 0.030 + 0.000028 * k2;
+  // Physical slow-motion viscous capillary-gravity damping + smooth high-k spectral de-aliasing roll-off near k_Nyquist = 574:
+  // Ripples radiate cleanly across the cuvette once and settle naturally over ~3.5-4.5s without multi-second sloshing!
+  let viscRate = 0.56 + 0.00018 * k2;
   let nyquistRoll = 1.0 - smoothstep(400.0, 555.0, k);
   let damp = exp(-viscRate * dt) * nyquistRoll;
 
@@ -356,10 +361,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let uv = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / ${WAVE_GRID_SIZE.toFixed(1)};
   let worldXZ = waveUVToWorldXZ(uv);
-  let sponge = 1.0 - smoothstep(${WAVE_SPONGE_INNER}, ${WAVE_SPONGE_OUTER}, length(worldXZ)) + u.surfaceParams.x * 0.0;
+  let dBox = max(abs(worldXZ.x), abs(worldXZ.y));
+  let borderZero = 1.0 - smoothstep(0.665, 0.698, dBox) + u.surfaceParams.x * 0.0;
 
-  let etaOut = clamp(prop.x * sponge, -0.14, 0.14);
-  let velOut = clamp(prop.y * sponge, -1.8, 1.8);
-  textureStore(waveOut, vec2<i32>(ix, iy), vec4<f32>(etaOut, velOut, lap * sponge, film * sponge));
+  let etaOut = clamp(prop.x * borderZero, -0.14, 0.14);
+  let velOut = clamp(prop.y * borderZero, -1.8, 1.8);
+  textureStore(waveOut, vec2<i32>(ix, iy), vec4<f32>(etaOut, velOut, lap * borderZero, film * borderZero));
 }
 `;

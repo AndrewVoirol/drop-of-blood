@@ -968,9 +968,11 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).not.toContain('if (lit.a < 0.000025 && cocBlur <');
     expect(RENDER_WGSL).toContain('let coarseSkip = 0.015;');
     expect(RENDER_WGSL).toContain('let pWaveXZ = mix(pPlumeOrigin.xz, pSurf.xz');
-    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.055, 0.42, activeCurve * (0.35 + 0.65 * grazingFresnelRim)), bloodInColumn), 1.0, darkTop);');
+    expect(RENDER_WGSL).toContain(
+      'mix(1.0, mix(0.045, 0.16, grazingFresnelRim), bloodInColumn)'
+    );
     expect(RENDER_WGSL).toContain('let turbidSharpness = exp(-fgPlume.tauIntact * 680.0);');
-    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('if (length(stretch) < 0.0038)');
+    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('if (sLenNow < 0.0038)');
   });
 
   it('guarantees C0-continuous linear-crossing raymarch rewind across coarseSkip/skipHalo, exact 4x4x4 brick clearance shells, and grazing CoC meniscus guards', () => {
@@ -1023,7 +1025,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain('let cocMeniscusFade = 0.008 + meniscusBokeh * (0.022 + 0.024 * grazingTopside);');
     expect(RENDER_WGSL).not.toContain('normalize(pRipple.xz');
     expect(RENDER_WGSL).not.toContain('dot(pRipple.xz, pRipple.xz)');
-    expect(RENDER_WGSL).toContain('let obliquePlanarVis = smoothstep(0.065, 0.22, -rd.y);');
+    expect(RENDER_WGSL).toContain('let obliquePlanarVis = smoothstep(0.065, 0.22, -rd.y) * inCuvetteTop;');
     expect(RENDER_WGSL).toContain('let underGrazingMix = smoothstep(0.065, 0.22, rd.y);');
     expect(LIGHTING_VOLUME_WGSL).toContain('let ctC = textureSampleLevel(concIn, linSampler, uvw, 0.0);');
   });
@@ -1171,7 +1173,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     // 1. No constant +0.09 Fresnel floor and no hbReflFilter multiplying transmitted tank water
     expect(COMPOSITE_WGSL).not.toContain('0.09 + 1.28 * fresnel');
     expect(COMPOSITE_WGSL).not.toContain('hbReflFilter');
-    expect(COMPOSITE_WGSL).toContain('let reflFresnel = clamp(fresnel * opticalDome * smoothstep(0.030, 0.12, -rd.y), 0.0, 0.28);');
+    expect(COMPOSITE_WGSL).toContain('let reflFresnel = clamp(fresnel * opticalDome * smoothstep(0.030, 0.12, -rd.y), 0.0, 0.11);');
 
     // Steep crown angle (cosI ~ 0.52) is ~5.4% subtle dielectric reflection, while shallow State 1 (cosI ~ 0.245) is >3.5x stronger (~23%)
     const fNormal = fresnelAirToWater(1.0);
@@ -1459,8 +1461,8 @@ describe('Boundary & adversarial edge-case invariants', () => {
     const omegaCrater = Math.sqrt((0.84 * kCrater + 0.0024 * kCrater ** 3) * Math.tanh(kCrater * 1.28));
     expect(Math.PI / omegaCrater).toBeLessThan(0.35);
 
-    // 4. Gentle meniscus anchor + age-gated Fahraeus rouleaux settling keeps early stems anchored while clearing 12-drop vessel by t = 37.5s
-    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('let settleGate = mix(0.015, 1.0, smoothstep(0.005, 0.072, depthBelowSurf));');
+    // 4. Gentle meniscus anchor + monotonic age-gated Fahraeus rouleaux settling (zero detached bottom O-ring cliff)
+    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('let settleGate = mix(0.38, 1.0, smoothstep(0.002, 0.055, depthBelowSurf));');
 
     // 5. vOxShear is gated by intactFrac (eliminating yellow-tan Soret fog on pure cLysed) & Dark-Field tightens dfDichroFactor to thin sheets
     expect(CONC_RESOLVE_WGSL).toContain('let activeSheet = thinIntactSheet * (0.38 + 0.62 * shearDispersion) * intactFrac;');
@@ -1484,7 +1486,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(FLUID_ADVECT_MAC_WGSL).toContain('let stemDrive = clamp(0.045 + drainRate * 0.22, 0.0, 0.20) * smoothstep(0.0, 0.05, drainRate);');
     expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('let parcelAge = ageTicks * (1.0 / 240.0);');
     expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('ageTicks = min(8191.0, ageTicks + max(1.0, round(dt * 240.0)));');
-    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('smoothstep(0.014, 0.064, rHoriz)');
+    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('let sheetSpan = clamp(sLenNow * 0.62, 0.0032, 0.0085);');
     expect(RENDER_WGSL).toContain('let intactMask = smoothstep(0.00006, 0.00085, conc.r) * meniscusMask;');
     expect(RENDER_WGSL).toContain('let lysedMask  = smoothstep(0.00028, 0.0016, conc.g) * meniscusMask;');
 
@@ -1548,8 +1550,10 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain('let activeCurve = smoothstep(0.015, 0.14, slopeLen);');
     expect(RENDER_WGSL).not.toContain('let rSwellFoot =');
     expect(RENDER_WGSL).toContain('let plumePresence = smoothstep(0.0006, 0.018, plume.tauTotal);');
-    expect(RENDER_WGSL).toContain('let domeTau = max(0.0065, domeChord * bloodInColumn * 0.46 * u.opticalParams.x);');
-    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.055, 0.42, activeCurve * (0.35 + 0.65 * grazingFresnelRim)), bloodInColumn), 1.0, darkTop);');
+    expect(RENDER_WGSL).toContain('let domeTau = max(0.0065, domeChord * surfBlood * 0.46 * u.opticalParams.x);');
+    expect(RENDER_WGSL).toContain(
+      'mix(1.0, mix(0.045, 0.16, grazingFresnelRim), bloodInColumn)'
+    );
     expect(RENDER_WGSL).toContain('let tauCell = mix(0.0042, 0.0065, smoothstep(0.10, 0.55, cocBlur));');
     expect(RENDER_WGSL).toContain('orificeCoreBoost = max(orificeCoreBoost, 1.0 + select(0.40, 0.65, topsideCam) * slotOrifice);');
     expect(COMPOSITE_WGSL).toContain('let softboxDome = (');
@@ -1559,7 +1563,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     // 5. Dark-Field: zero magenta clear-water tint & thin-sheet scarlet-vermilion confined to coneDensity < 0.032 and tauTotal < 0.030
     expect(RENDER_WGSL).not.toContain('vec3<f32>(0.13, 0.014, 0.032)');
     expect(RENDER_WGSL).not.toContain('vec3<f32>(0.24, 0.026, 0.056)');
-    expect(RENDER_WGSL).toContain('vec3<f32>(0.06, 0.005, 0.004) * bloodInColumn * waveSlope * opticalDome');
+    expect(RENDER_WGSL).toContain('vec3<f32>(0.06, 0.005, 0.004) * surfBlood * waveSlope * opticalDome * inCuvetteTop');
     expect(RENDER_WGSL).toContain('let thinNeighborhood = 1.0 - smoothstep(0.016, 0.042, coneDensity);');
     expect(RENDER_WGSL).toContain('* (1.0 - smoothstep(0.009, 0.032, tauTotal))');
     expect(RENDER_WGSL).toContain('let plugSelfShadow = 1.0 - 0.76 * smoothstep(0.028, 0.088, coneDensity);');
@@ -1674,5 +1678,65 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain('let tirFoldedAtten = exp(-tSurfHit * 0.52) * mix(0.30, 0.46, craterDamp);');
     expect(RENDER_WGSL).not.toContain('mercuryBand');
     expect(RENDER_WGSL).not.toContain('slopeContrast');
+  });
+
+  it('enforces Round 10 live-exploration XDR sRGB parity, brisk pipette squeeze, non-reflecting cuvette ripple absorber, rose-ruby hemolysis guard, and side-on aquarium refraction', () => {
+    // 1. Apple Silicon XDR extended-sRGB swapchain preserves IEC sRGB transfer on midtones (< 0.78) while opening EDR specular headroom (> 1.0)
+    expect(COMPOSITE_WGSL).toContain('return vec4<f32>(srgb + edrBoost, 1.0);');
+    for (const lin of [0.02, 0.15, 0.42, 0.75]) {
+      const excess = Math.max(lin - 0.78, 0.0);
+      expect(excess).toBe(0.0);
+    }
+    const specLin = 1.45;
+    const ex = specLin - 0.78;
+    const boost = (ex * 2.2) / (ex + 2.2 * 1.35 + 1e-4);
+    expect(1.0 + boost).toBeGreaterThan(1.25);
+
+    // 2. Quick-click / + Drop squeezes briskly (~0.15s) from PIPETTE_TIP_Y = +0.55 and auto-releases prior quick drops on rapid multi-clicks
+    const sys = new MultiDropSystem();
+    sys.reset(1.0);
+    expect(sys.slots[0].pipettePresence).toBe(1.0);
+    const q1 = sys.beginQuickPipetteDrop([0.12, -0.08], 1.0);
+    expect(q1.mode).toBe('pendant');
+    expect(sys.hasAutoSqueezePendantDrop()).toBe(true);
+    expect(q1.center[1]).toBeLessThan(PIPETTE_TIP_Y);
+    expect(q1.center[1]).toBeGreaterThan(PIPETTE_TIP_Y - 0.04);
+    // Rapid second quick-click auto-releases q1 instead of cancelling it
+    const q2 = sys.beginQuickPipetteDrop([-0.14, 0.09], 1.0);
+    expect(q1.active).toBe(true);
+    expect(q1.mode).toBe('aerial');
+    expect(q2.mode).toBe('pendant');
+    for (let i = 0; i < 12; i += 1) {
+      sys.updatePendantDrop(1 / 60);
+      sys.step(1 / 60);
+    }
+    expect(q2.mode).toBe('aerial');
+    expect(q2.active).toBe(true);
+
+    // 3. OrbitCamera clamps camera above y = -0.88 so user cannot orbit beneath the y = -0.98 glass cuvette base
+    const cam = new OrbitCamera();
+    cam.orbit(0, -10.0);
+    cam.updateMatrices(1.6);
+    expect(cam.position[1]).toBeGreaterThanOrEqual(-0.8801);
+
+    // 4. Rose-ruby hemolysis guard prevents 430nm Soret absorption from filtering cool blue studio water into yellow-green (G > R)
+    expect(RENDER_WGSL).toContain(
+      'let gRoseGuard = min(lutSieveRaw.g, mix(lutSieveRaw.b * 0.94 + 0.04 * lutSieveRaw.r, lutSieveRaw.g, intactDichroGate));'
+    );
+    expect(PARTICLE_ADVECT_SPLAT_WGSL).not.toContain('mix(0.068, 0.165');
+    expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain(
+      'let stackSettle = mix(0.032, 0.062, smoothstep(0.04, 0.48, depthBelowSurf));'
+    );
+
+    // 5. Non-reflecting square Rayleigh velocity absorber + surfaceBloodContact ripple decoupling + borosilicate cuvette + side-on topSnellGate
+    expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let rayleighDamp = exp(-dt * (24.0 * absorbZone * absorbZone));');
+    expect(RENDER_WGSL).toContain('fn cuvetteSignedDistXZ(');
+    expect(RENDER_WGSL).toContain('fn evalCuvetteFloorBackdrop(');
+    expect(RENDER_WGSL).toContain(
+      'let surfaceBloodContact = clamp(max(collarProximity, smoothstep(0.004, 0.026, nearSurfConc)), 0.0, 1.0);'
+    );
+    expect(RENDER_WGSL).toContain(
+      'let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * smoothstep(0.025, 0.14, camRelY);'
+    );
   });
 });

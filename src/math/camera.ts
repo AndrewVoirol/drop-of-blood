@@ -130,20 +130,32 @@ export class OrbitCamera {
     }
   }
 
+  private minElevationForTarget(centerY: number, dist: number): number {
+    // Keep camera above the y = -0.98 borosilicate cuvette floor (minCamY = -0.88)
+    const minCamY = -0.88;
+    const minSin = clamp((minCamY - centerY) / Math.max(dist, 0.25), -0.90, 0.90);
+    return Math.max(-1.15, Math.asin(minSin));
+  }
+
   public orbit(deltaAzimuth: number, deltaElevation: number): void {
     this.followHeroEnabled = false;
     this.targetAzimuth += deltaAzimuth;
-    this.targetElevation = clamp(this.targetElevation + deltaElevation, -1.15, 1.15);
+    const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
+    this.targetElevation = clamp(this.targetElevation + deltaElevation, minEl, 1.15);
   }
 
   public dolly(factor: number): void {
     this.followHeroEnabled = false;
     this.targetDistance = clamp(this.targetDistance * factor, 0.82, 2.85);
+    const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
+    this.targetElevation = Math.max(this.targetElevation, minEl);
   }
 
   public panVertical(deltaY: number): void {
     this.followHeroEnabled = false;
     this.targetCenter[1] = clamp(this.targetCenter[1] + deltaY, -0.65, 0.35);
+    const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
+    this.targetElevation = Math.max(this.targetElevation, minEl);
   }
 
   public tick(dtRealSec: number, aspect: number): void {
@@ -161,6 +173,10 @@ export class OrbitCamera {
 
   public updateMatrices(aspect: number): void {
     const safeAspect = Number.isFinite(aspect) && aspect > 0.05 ? aspect : 16 / 9;
+    const minEl = this.minElevationForTarget(this.target[1], this.distance);
+    if (this.elevation < minEl) {
+      this.elevation = minEl;
+    }
     const cosEl = Math.cos(this.elevation);
     this.position[0] = this.target[0] + this.distance * cosEl * Math.sin(this.azimuth);
     this.position[1] = this.target[1] + this.distance * Math.sin(this.elevation);
