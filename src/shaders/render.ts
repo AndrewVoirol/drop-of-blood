@@ -13,6 +13,10 @@ import {
   WAVE_HALF_EXTENT,
 } from './common';
 
+const WAVE_WIN_INNER = (WAVE_HALF_EXTENT * 0.72).toFixed(4);
+const WAVE_WIN_OUTER = (WAVE_HALF_EXTENT * 0.96).toFixed(4);
+const WAVE_RAY_RADIUS = (WAVE_HALF_EXTENT * 0.98).toFixed(4);
+
 const SHARED_OPTICAL_DROP_WGSL = /* wgsl */ `
 struct SurfaceInfo {
   height: f32,
@@ -45,7 +49,7 @@ fn sampleSpectralLut(tau: f32, lysisFrac: f32) -> vec3<f32> {
 
 fn evalWaveHeightRaw(xz: vec2<f32>) -> vec4<f32> {
   let rDist = length(xz);
-  let window = 1.0 - smoothstep(1.18, 1.54, rDist);
+  let window = 1.0 - smoothstep(${WAVE_WIN_INNER}, ${WAVE_WIN_OUTER}, rDist);
   if (window <= 0.0001) {
     return vec4<f32>(0.0);
   }
@@ -56,11 +60,11 @@ fn evalWaveHeightRaw(xz: vec2<f32>) -> vec4<f32> {
 
 /**
  * 4-tap Ruijters & Thevenaz (2012) hardware-bilinear C2 cubic B-spline 2D wave reconstruction.
- * Eliminates 12.5mm (23 Retina px) bilinear grid creases on wetting collars and meniscus ripples.
+ * Smoothly reconstructs fine capillary wavelets without bilinear grid creases.
  */
 fn evalWaveBspline(xz: vec2<f32>) -> vec4<f32> {
   let rDist = length(xz);
-  let window = 1.0 - smoothstep(1.18, 1.54, rDist);
+  let window = 1.0 - smoothstep(${WAVE_WIN_INNER}, ${WAVE_WIN_OUTER}, rDist);
   if (window <= 0.0001) {
     return vec4<f32>(0.0);
   }
@@ -106,7 +110,7 @@ fn evalSurfaceHeightSmooth(xz: vec2<f32>) -> f32 {
 fn evalSurface(xz: vec2<f32>) -> SurfaceInfo {
   let baseY = u.surfaceParams.x;
   let rDist = length(xz);
-  let window = 1.0 - smoothstep(1.18, 1.54, rDist);
+  let window = 1.0 - smoothstep(${WAVE_WIN_INNER}, ${WAVE_WIN_OUTER}, rDist);
   if (window <= 0.0001) {
     var flatInfo: SurfaceInfo;
     flatInfo.height = baseY;
@@ -228,9 +232,9 @@ fn evalStudioBackdrop(rd: vec3<f32>, inWater: bool) -> vec3<f32> {
     let depthTint = mix(vec3<f32>(0.72, 0.83, 0.91), vec3<f32>(0.985, 0.996, 1.00), smoothstep(-0.52, 0.18, rd.y));
     studio = studio * depthTint;
   } else {
-    let airGrad = mix(vec3<f32>(0.72, 0.795, 0.86), vec3<f32>(0.94, 0.968, 0.995), smoothstep(-0.02, 0.50, rd.y));
-    let overheadGlow = vec3<f32>(0.10, 0.11, 0.125) * pow(max(dot(rd, keyDir), 0.0), 5.0);
-    studio = mix(studio, airGrad, 0.50) + overheadGlow;
+    let airGrad = mix(vec3<f32>(0.64, 0.735, 0.82), vec3<f32>(0.965, 0.986, 1.005), smoothstep(-0.16, 0.38, rd.y));
+    let overheadGlow = vec3<f32>(0.135, 0.145, 0.16) * smoothstep(0.18, 0.68, rd.y) * pow(max(dot(rd, keyDir), 0.0), 3.8);
+    studio = mix(studio, airGrad, 0.58) + overheadGlow;
   }
 
   return studio;
@@ -295,7 +299,12 @@ fn evalDropBodySDF(p: vec3<f32>, center: vec3<f32>, radii: vec3<f32>, isPendant:
     return (mix(dNeck, dBulb, hU) - kFillet * hU * (1.0 - hU)) * 0.85;
   }
   let q = rel / radii;
-  return (length(q) - 1.0) * min(radii.x, radii.y);
+  let rLen = length(q);
+  // Axisymmetric Legendre P_3(cos theta) capillary pinch-off recoil asymmetry (zero polar harmonics!)
+  let uy = clamp(q.y / max(rLen, 1e-4), -1.0, 1.0);
+  let p3 = 0.5 * (5.0 * uy * uy * uy - 3.0 * uy);
+  let oscShape = clamp((radii.y - radii.x) / max(radii.x, 1e-4), -0.35, 0.35);
+  return (rLen - 1.0 - 0.085 * oscShape * p3) * min(radii.x, radii.y);
 }
 
 /**
@@ -634,6 +643,53 @@ fn intersectAerialDrop(ro: vec3<f32>, rd: vec3<f32>, tFocus: f32, apRadius: f32)
   return intersectAerialDropFrom(ro, rd, 0.001, tFocus, apRadius);
 }
 
+fn evalDropStudioWindowSpec(
+  reflSpec: vec3<f32>,
+  fresnel: f32,
+  cocSoften: f32,
+  darkMode: bool
+) -> f32 {
+  let worldUp = vec3<f32>(0.0, 1.0, 0.0);
+
+  // Primary vertical-oblique studio softbox window positioned near 100 deg from view axis so drop curvature
+  // wraps the rectangular diffuser into a slender limb-hugging crescent weighted by physical dielectric Fresnel
+  let boxCenter = normalize(vec3<f32>(-0.74, 0.65, 0.17));
+  let boxRight = normalize(cross(worldUp, boxCenter));
+  let boxUp = cross(boxCenter, boxRight);
+  var primaryLum = 0.0;
+  let alignMain = dot(reflSpec, boxCenter);
+  if (alignMain > 0.0) {
+    let uBox = dot(reflSpec, boxRight);
+    let vBox = dot(reflSpec, boxUp);
+    let rCorner = 0.046;
+    let q = abs(vec2<f32>(uBox, vBox)) - vec2<f32>(0.132 - rCorner, 0.40 - rCorner);
+    let dBox = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - rCorner;
+    let feather = mix(0.046, 0.145, cocSoften);
+    let windowMask = 1.0 - smoothstep(-0.016, feather, dBox);
+    let lampFalloff = exp(-(uBox * uBox) * 20.0 - (vBox * vBox) * 3.6);
+    primaryLum = windowMask * (10.5 + 16.5 * lampFalloff);
+  }
+
+  // Secondary opposite-limb studio fill strip card
+  let fillCenter = normalize(vec3<f32>(0.80, 0.48, 0.36));
+  let fillRight = normalize(cross(worldUp, fillCenter));
+  let fillUp = cross(fillCenter, fillRight);
+  var fillLum = 0.0;
+  if (dot(reflSpec, fillCenter) > 0.0) {
+    let uFill = dot(reflSpec, fillRight);
+    let vFill = dot(reflSpec, fillUp);
+    let rFill = 0.052;
+    let qFill = abs(vec2<f32>(uFill, vFill)) - vec2<f32>(0.145 - rFill, 0.33 - rFill);
+    let dFill = length(max(qFill, vec2<f32>(0.0))) + min(max(qFill.x, qFill.y), 0.0) - rFill;
+    let featherFill = mix(0.062, 0.165, cocSoften);
+    let fillMask = 1.0 - smoothstep(-0.018, featherFill, dFill);
+    fillLum = fillMask * (4.2 + 4.8 * exp(-(uFill * uFill) * 16.0 - (vFill * vFill) * 4.2));
+  }
+
+  let specScale = select(1.0, 0.58, darkMode);
+  return (primaryLum + fillLum) * fresnel * (1.0 - 0.52 * cocSoften) * specScale;
+}
+
 fn shadeAerialDrop(
   ro: vec3<f32>,
   rd: vec3<f32>,
@@ -652,8 +708,8 @@ fn shadeAerialDrop(
   let darkMode = u.opticalParams.w > 0.5;
   let specScale = select(1.0, 0.55, darkMode);
 
-  // Whole human blood refractive index n = 1.365 (interpolating smoothly to water n = 1.333 down wetting collar)
-  let iorDrop = mix(1.333, 1.365, collarFade);
+  // Whole human blood (Hct ~ 45%) bulk refractive index n = 1.378 (grading smoothly to water n = 1.333 down wetting collar)
+  let iorDrop = mix(1.333, 1.378, collarFade);
   let fresnel = fresnelDielectric(cosI, 1.0, iorDrop);
   let reflDir = reflect(rd, n);
   let envRefl = evalStudioBackdrop(reflDir, false);
@@ -663,21 +719,17 @@ fn shadeAerialDrop(
   let invR = 1.0 / radii;
   let localSurfY = evalSurfaceHeightSmooth(pHit.xz);
 
-  // Unified single overhead studio softbox on upper convex drop dome:
-  // Evaluate softbox reflection on the strictly convex ellipsoid dome normal (with concave-fillet rejection)
-  // so sminPoly collar inflection never folds a secondary hourglass/triangle specular as center.y sinks!
+  // Curved rectangular studio softbox strip evaluated on strictly convex drop dome normal (with concave-fillet rejection)
+  // weighted by physical dielectric Fresnel (F0 ~ 0.025) — zero circular Phong sticker dot!
   let nConvex = normalize(((pHit - center) * invR) * invR);
   let isFreeDrop = slot.velOscAndDrain.w > 0.0;
   let nSpec = select(n, nConvex, isFreeDrop);
   let reflSpec = reflect(rd, nSpec);
   let convexMatch = select(1.0, smoothstep(0.955, 0.998, dot(n, nConvex)), isFreeDrop);
   let domeBaseY = select(center.y, max(center.y, localSurfY + 0.002), isFreeDrop);
-  let upperDomeVis = smoothstep(-0.04 * radii.y, 0.24 * radii.y, pHit.y - domeBaseY) * convexMatch;
-  let keyBoxDir = normalize(vec3<f32>(0.24, 0.84, 0.44));
-  let keyAlign = dot(reflSpec, keyBoxDir);
-  let specKey = (smoothstep(0.925, 0.988, keyAlign) * 1.42 + pow(max(keyAlign, 0.0), 150.0) * 0.92)
-              * domeSpecGate * upperDomeVis * specScale;
-  let rimSheen = pow(1.0 - cosI, 3.0) * smoothstep(-0.10, 0.55, reflSpec.y) * 0.20 * domeSpecGate * upperDomeVis * specScale;
+  let upperDomeVis = smoothstep(-0.28 * radii.y, 0.22 * radii.y, pHit.y - domeBaseY) * convexMatch;
+  let specKey = evalDropStudioWindowSpec(reflSpec, fresnel, 0.0, darkMode) * domeSpecGate * upperDomeVis;
+  let rimSheen = fresnel * pow(1.0 - cosI, 2.2) * smoothstep(-0.12, 0.55, reflSpec.y) * 0.28 * domeSpecGate * upperDomeVis * specScale;
 
   let nExit = normalize(((pExit - center) * invR) * invR);
   let rdIn = refract(rd, n, 1.0 / iorDrop);
@@ -687,32 +739,37 @@ fn shadeAerialDrop(
   }
   let refrBg = evalStudioBackdrop(rdOut, false);
 
-  // Exact Prahl (1999) spectral hemoglobin transmittance across continuous drop + liquid wetting-neck chord:
-  // Thin air-exposed capillary necks & grazing rims are oxygenated (vOx -> 0.86), grading into whole-blood belly (vOx -> 0.24)
+  // Turbid whole-blood (Hct ~ 45%, erythrocyte Mie mu_s' ~ 2.2 mm^-1) exponential chord extinction + Prahl (1999) spectral LUT:
+  // Core chord (~3-4 mm, tau' > 8) is optically opaque dark oxblood; ruby background transmission is strictly confined
+  // to < 0.5 mm grazing rims, stretched capillary pinch-off necks, and the meniscus wetting collar.
   let rawChord = max(0.0, hit.tExit - hit.tEnter);
   let hCollar = max(0.0, pHit.y - localSurfY);
   let chord = mix(hCollar * 1.65, rawChord + 0.0025, smoothstep(0.04, 0.48, hit.neckBlend)) * smoothstep(0.0, 0.24, hit.neckBlend);
   let dropOxState = mix(0.86, 0.24, smoothstep(0.010, 0.058, chord));
-  let trans = sampleSpectralLut(chord * 1.48 * u.opticalParams.x, dropOxState);
+  let turbidGate = smoothstep(0.08, 0.68, hit.neckBlend);
+  let ballisticTrans = exp(-chord * 92.0 * u.opticalParams.x * turbidGate);
+  let trans = sampleSpectralLut(chord * 3.85 * u.opticalParams.x, dropOxState) * ballisticTrans;
 
-  let bellyCaustic = smoothstep(-0.15, 0.72, -n.y) * smoothstep(0.18, 0.85, cosI) * collarFade;
-  let internalScatter = (
-    vec3<f32>(0.058, 0.0011, 0.0016) +
-    vec3<f32>(0.32, 0.0075, 0.0095) * bellyCaustic * 0.65
-  ) * select(1.0, 0.38, darkMode);
-
-  // Rays entering the lower hemisphere or capillary wetting collar pass directly into the submerged liquid stem (backdropBehind)
-  // instead of refracting out into the bright air sky, eliminating any horizontal meniscus gap or base ring!
   let distAboveMeniscus = pHit.y - localSurfY;
+  let studioWrap = clamp(0.46 + 0.34 * n.y - 0.22 * n.x + 0.24 * n.z, 0.0, 1.0);
+  let thinChordGlow = (1.0 - smoothstep(0.006, 0.034, rawChord)) * collarFade;
+  let grazingRubyRim = pow(1.0 - cosI, 2.3) * smoothstep(0.004, 0.040, max(0.0, distAboveMeniscus)) * collarFade;
+  let bellyCaustic = smoothstep(-0.15, 0.72, -n.y) * smoothstep(0.18, 0.85, cosI) * collarFade;
+  let oxbloodCore = mix(vec3<f32>(0.018, 0.00030, 0.00036), vec3<f32>(0.054, 0.00090, 0.00105), studioWrap);
+  let rubyScatter = vec3<f32>(0.155, 0.0036, 0.0030) * clamp(0.62 * thinChordGlow + 0.52 * grazingRubyRim + 0.34 * bellyCaustic, 0.0, 1.15);
+  let internalScatter = (oxbloodCore + rubyScatter) * select(1.0, 0.42, darkMode);
+
+  // Rays entering the lower hemisphere or capillary wetting collar pass into the submerged stem (backdropBehind);
+  // turbid whole-blood core blocks upside-down glass-marble sky lensing (ballisticTrans < 0.001 in core).
   let coreLensHit = smoothstep(0.55, 0.96, hit.edgeCov);
   let airExitGate = smoothstep(0.020, 0.078, distAboveMeniscus) * smoothstep(0.36, 0.88, hit.neckBlend) * coreLensHit;
-  let bgThrough = mix(backdropBehind, refrBg, 0.88 * airExitGate);
-  let bodyColor = bgThrough * trans + internalScatter * (1.0 - trans.g) * collarFade;
+  let bgThrough = mix(backdropBehind, refrBg, 0.24 * airExitGate * ballisticTrans);
+  let bodyColor = bgThrough * trans + internalScatter * (1.0 - trans.g) * mix(0.28, 1.0, collarFade);
   let skyReflGate = smoothstep(-0.18, 0.22, reflDir.y);
   let effEnvRefl = envRefl * mix(0.14, 1.0, skyReflGate);
   let domeEmergence = smoothstep(0.006, 0.052, max(0.0, distAboveMeniscus));
   let edgeFresDamp = hit.edgeCov * hit.edgeCov * smoothstep(0.25, 0.92, hit.edgeCov);
-  let fresnelWeight = clamp(fresnel * mix(0.12, mix(0.22, 0.56, domeEmergence), collarFade) * edgeFresDamp, 0.0, 0.62);
+  let fresnelWeight = clamp(fresnel * mix(0.10, mix(0.18, 0.62, domeEmergence), collarFade) * edgeFresDamp, 0.0, 0.52);
   let dropFinal = mix(bodyColor, effEnvRefl, fresnelWeight)
                 + vec3<f32>(0.97, 0.985, 1.0) * (specKey + rimSheen) * edgeFresDamp;
 
@@ -1022,7 +1079,7 @@ fn intersectWaterSurface(ro: vec3<f32>, rd: vec3<f32>, tMin: f32, tMax: f32, fro
 
   if (rdXZ2 > 1e-6) {
     let bXZ = dot(ro.xz, rd.xz) / rdXZ2;
-    let cXZ = (dot(ro.xz, ro.xz) - 1.56 * 1.56) / rdXZ2;
+    let cXZ = (dot(ro.xz, ro.xz) - ${WAVE_RAY_RADIUS} * ${WAVE_RAY_RADIUS}) / rdXZ2;
     let discXZ = bXZ * bXZ - cXZ;
     if (discXZ <= 0.0) {
       checkWaves = false;
@@ -1038,7 +1095,7 @@ fn intersectWaterSurface(ro: vec3<f32>, rd: vec3<f32>, tMin: f32, tMax: f32, fro
 
   if (checkWaves) {
     let horizSpan = sqrt(max(rdXZ2, 0.0)) * (wHi - wLo);
-    let adaptiveSteps = clamp(i32(ceil(horizSpan / 0.011)), 12, 44);
+    let adaptiveSteps = clamp(i32(ceil(horizSpan / 0.0052)), 14, 56);
     let hHit = marchSurfaceSegment(ro, rd, wLo, wHi, adaptiveSteps, fromAir);
     if (hHit > 0.0) {
       return hHit;
@@ -1107,9 +1164,9 @@ fn evalTopsideDropReflection(
 
     let kNeckMax = kNeckBase * clamp(rBase / 0.048, 0.35, 1.15);
     let hClear = max(0.0, center.y - radii.y - surfY);
-    let heightAtten = 1.0 / (1.0 + 4.5 * hClear * hClear);
+    let heightAtten = exp(-hClear * 26.0);
     let rCoC = apRadius * abs(tCl - remFocusRefl) / focalRef;
-    let rPen = max(0.0024 + tCl * (0.0085 + pixRad * 2.5), rCoC * 2.4 + 0.0045 * waveSlope);
+    let rPen = max(0.0036 + tCl * (0.012 + pixRad * 2.5), rCoC * 2.5 + 0.0048 * waveSlope);
     let boundExtra = select(0.008, kNeckMax * 1.20, !isPend && hClear < 0.004);
     let rMax = max(radii.x, radii.y) + rPen * 1.35 + boundExtra;
     let ocB = pReflOrig - center;
@@ -1354,7 +1411,7 @@ fn evalTopsideDropReflection(
   let pHit = pReflOrig + dropReflDir * bestT0;
   let collarFade = smoothstep(0.02, 0.62, bestNeckBlend);
   let domeSpecGate = smoothstep(0.90, 0.996, bestNeckBlend);
-  let iorDrop = mix(1.333, 1.365, collarFade);
+  let iorDrop = mix(1.333, 1.378, collarFade);
   let cosDrop = clamp(dot(bestN, -dropReflDir), 0.0, 1.0);
   let fresnelDrop = fresnelDielectric(cosDrop, 1.0, iorDrop);
   let reflOnDrop = reflect(dropReflDir, bestN);
@@ -1370,16 +1427,11 @@ fn evalTopsideDropReflection(
   let reflSpecDrop = reflect(dropReflDir, nSpecRefl);
   let convexMatchRefl = select(1.0, smoothstep(0.94, 0.996, dot(bestN, nConvexRefl)), isFreeRefl);
   let upperVis = smoothstep(-0.42 * radii.y, 0.24 * radii.y, pHit.y - center.y) * domeSpecGate * convexMatchRefl;
-  let keyBoxDir = normalize(vec3<f32>(0.24, 0.84, 0.44));
-  let keyAlign = dot(reflSpecDrop, keyBoxDir);
   let cocSoften = smoothstep(0.0004, 0.0045, bestCoC + 0.0016 * waveSlope);
-  let specLo = mix(0.928, 0.865, cocSoften);
-  let specAmp = mix(1.26, 0.42, cocSoften);
-  let specKey = (smoothstep(specLo, 0.992, keyAlign) * specAmp + pow(max(keyAlign, 0.0), 120.0) * 0.68 * (1.0 - 0.65 * cocSoften))
-              * upperVis * specScale;
-  let rimSheen = pow(1.0 - cosDrop, 3.0) * 0.16 * skyFace * domeSpecGate * convexMatchRefl * specScale;
+  let specKey = evalDropStudioWindowSpec(reflSpecDrop, fresnelDrop, cocSoften, darkMode) * upperVis;
+  let rimSheen = fresnelDrop * pow(1.0 - cosDrop, 2.2) * 0.24 * skyFace * domeSpecGate * convexMatchRefl * specScale;
 
-  // Authentic 3D refracted Beer-Lambert/Prahl hemoglobin chord + lower-hemisphere ruby belly caustic (-bestN.y > 0)
+  // Turbid whole-blood reflection body + Prahl hemoglobin thin-limb rim + lower-hemisphere ruby belly glow (-bestN.y > 0)
   let pExit = pHit + dropReflDir * bestChord;
   let nExit = normalize(((pExit - center) * invR) * invR);
   let rdIn = refract(dropReflDir, bestN, 1.0 / iorDrop);
@@ -1387,23 +1439,24 @@ fn evalTopsideDropReflection(
   if (dot(rdOut, rdOut) < 0.25) {
     rdOut = reflect(rdIn, -nExit);
   }
-  let refrBg = mix(skyReflCol, evalStudioBackdrop(rdOut, false), 0.72);
+  let refrBg = mix(skyReflCol, evalStudioBackdrop(rdOut, false), 0.22);
 
   let neckVis = smoothstep(0.0, 0.12, bestNeckBlend);
   let effChord = bestChord * neckVis;
   let hbReflTau = effChord * 1.65 * u.opticalParams.x;
-  let trans = sampleSpectralLut(hbReflTau, 0.08);
+  let ballisticRefl = exp(-effChord * 88.0 * u.opticalParams.x * collarFade);
+  let trans = sampleSpectralLut(hbReflTau, 0.08) * ballisticRefl;
   let bellyCaustic = smoothstep(-0.18, 0.70, -bestN.y) * smoothstep(0.16, 0.88, cosDrop) * collarFade;
   let internalScatter = (
-    vec3<f32>(0.028, 0.0004, 0.0014) +
-    vec3<f32>(0.38, 0.0038, 0.013) * bellyCaustic * 0.85
-  ) * select(1.0, 0.38, darkMode);
-  let bodyCol = refrBg * trans + internalScatter * (1.0 - trans.g) * mix(0.35, 1.0, collarFade);
+    vec3<f32>(0.065, 0.0008, 0.0010) +
+    vec3<f32>(0.29, 0.0045, 0.0040) * bellyCaustic * 0.88
+  ) * select(1.0, 0.40, darkMode);
+  let bodyCol = refrBg * trans + internalScatter * (1.0 - trans.g) * mix(0.32, 1.0, collarFade);
   let dropCol = mix(bodyCol, envOnDrop, clamp(fresnelDrop * mix(0.08, 0.28, collarFade) * skyFace, 0.0, 0.28))
               + vec3<f32>(0.97, 0.985, 1.0) * (specKey + rimSheen);
 
   let chordNorm = clamp(effChord / max(1.65 * radii.x, 1e-4), 0.0, 1.0);
-  let opticalPresence = mix(0.56, 1.0, smoothstep(0.0, 0.62, chordNorm));
+  let opticalPresence = mix(0.48, 0.94, smoothstep(0.0, 0.62, chordNorm));
   return vec4<f32>(dropCol, bestCov * neckVis * opticalPresence);
 }
 `;
@@ -2102,12 +2155,8 @@ fn evalTopsideBranch(
     let activeCurve = smoothstep(0.015, 0.14, slopeLen);
     let reflDir = reflect(rd, sInfo.normal);
     var reflCol = evalStudioBackdrop(reflDir, false) * select(vec3<f32>(1.03, 1.04, 1.05), vec3<f32>(1.0), darkTop);
-    let scrimBand = 0.94 + 0.06 * smoothstep(-0.02, 0.34, reflDir.y);
-    let rippleGradMod = 1.0 + capillaryRing * (
-      -0.42 * (1.0 - smoothstep(0.06, 0.34, reflDir.y)) +
-      0.38 * smoothstep(0.26, 0.68, reflDir.y)
-    );
-    reflCol = reflCol * scrimBand * select(rippleGradMod, 1.0, darkTop);
+    let studioGobo = mix(0.42, 1.24, smoothstep(0.06, 0.56, reflDir.y));
+    reflCol = reflCol * select(mix(1.0, studioGobo, waveSlope), 1.0, darkTop);
     if (darkTop) {
       let dfTopRing = exp(-pow((reflDir.y - 0.14) / 0.095, 2.0));
       reflCol = reflCol + vec3<f32>(0.18, 0.22, 0.28) * (0.30 + 0.70 * dfTopRing) * waveSlope;
@@ -2194,8 +2243,8 @@ fn evalTopsideBranch(
     }
 
     // Surfactant crimson film optical absorption via Duysens-sieved Prahl spectral LUT:
-    // Confined strictly to immediate collar contact with ruby sieve so dilute surfactant never tints water tan!
-    let stainCore = smoothstep(0.45, 0.88, sInfo.stain) * 0.35;
+    // Confined strictly to active meniscus collar curvature so no flat 2D red coin lingers on calm water!
+    let stainCore = smoothstep(0.68, 0.96, sInfo.stain) * 0.06 * activeCurve;
     let stainStrength = stainCore * (0.14 + 0.86 * opticalDome) * obliquePlanarVis;
     if (stainStrength > 0.005) {
       let filmTau = stainStrength * 0.0052;
@@ -2208,22 +2257,22 @@ fn evalTopsideBranch(
     let hRimRaw = rimLightDir + vDir;
     let hRim = hRimRaw / max(length(hRimRaw), 1e-5);
 
-    // Keep ambient grey sky veil low over blood so swells/craters stay rich translucent ruby/oxblood (never grey!),
-    // while grazing Schlick rims + 1:1 Retina studio softbox specular windows deliver crisp 3D liquid wet gloss!
+    // Preserve deep crimson/ruby saturation on flat submerged plumes (avoiding grey sky washout!) while
+    // keeping full dielectric Fresnel reflection & 1:1 Retina softbox speculars across active wave slopes/swells!
     let grazingFresnelRim = pow(1.0 - cosI, 3.0);
-    let plumeGlareDamp = select(mix(1.0, mix(0.035, 0.14, activeCurve * grazingFresnelRim), bloodInColumn), 1.0, darkTop);
-    let clearWaterReliefGate = select(mix(1.0, 0.08 * activeCurve, bloodInColumn), 1.0, darkTop);
+    let plumeGlareDamp = select(mix(1.0, mix(0.055, 0.42, activeCurve * (0.35 + 0.65 * grazingFresnelRim)), bloodInColumn), 1.0, darkTop);
+    let clearWaterReliefGate = select(mix(1.0, mix(0.18, 0.72, activeCurve), bloodInColumn), 1.0, darkTop);
     let viewSteepness = 0.20 + 0.80 * smoothstep(0.03, 0.28, -rd.y);
     let tangentContinuity = mix(crestCont, 1.0, grazingWaveMix);
 
-    // Broad dark-field rim sheen in volTex; sharp Retina glints & softbox dome reflection run at 1:1 in COMPOSITE_WGSL!
+    // Pure colorless Fresnel reflection in Bright-Field (zero painted grey rippleRelief bands); subtle rim in Dark-Field
     let waveRim = pow(max(dot(sInfo.normal, hRim), 0.0), 18.0) * select(0.0, 0.48, darkTop)
                 * opticalDome * (0.12 + 0.88 * waveSlope) * tangentContinuity;
-    let rippleRelief = clamp(
-      -sInfo.lap * select(34.0, 12.5, darkTop) + sInfo.normal.z * select(3.15, 0.62, darkTop),
-      select(-0.145, -0.008, darkTop),
-      select(0.215, 0.155, darkTop)
-    ) * waveSlope * opticalDome * clearWaterReliefGate * tangentContinuity;
+    let rippleRelief = select(
+      0.0,
+      clamp(-sInfo.lap * 11.0 + sInfo.normal.z * 0.55, 0.0, 0.14) * waveSlope * opticalDome * tangentContinuity,
+      darkTop
+    );
     let darkPlumeRim = select(
       vec3<f32>(0.0),
       vec3<f32>(0.06, 0.005, 0.004) * bloodInColumn * waveSlope * opticalDome,
@@ -2231,13 +2280,12 @@ fn evalTopsideBranch(
     );
 
     let maxCalmVeil = select(
-      (0.16 * plumeGlareDamp + (0.28 * waveSlope + 0.12 * activeCurve) * clearWaterReliefGate) * opticalDome * viewSteepness,
+      (0.16 * plumeGlareDamp + (0.24 * waveSlope + 0.10 * activeCurve) * clearWaterReliefGate) * opticalDome * viewSteepness,
       (0.20 + 0.34 * waveSlope) * opticalDome,
       darkTop
     );
-    let fresnelCalm = fresnelDielectric(clamp(-rd.y, 0.0, 1.0), 1.0, 1.333);
-    let effTopFresnel = select(mix(fresnel, fresnelCalm, bloodInColumn * (1.0 - max(0.65 * waveSlope, activeCurve))), fresnel, darkTop);
-    let reflWeight = clamp((effTopFresnel + 0.055 * capillaryRing * clearWaterReliefGate) * fresnelCap, 0.0, maxCalmVeil);
+    let effTopFresnel = fresnel;
+    let reflWeight = clamp((effTopFresnel + 0.038 * capillaryRing * clearWaterReliefGate) * fresnelCap, 0.0, maxCalmVeil);
     let horizonFade = mix(1.0 - smoothstep(1.75, 4.2, length(pPlumeOrigin.xz)), 1.0, bloodInColumn);
     let waterTopCol = mix(refrCol, reflCol, reflWeight)
                     + vec3<f32>(waveRim * 0.86, waveRim * 0.93, waveRim)
@@ -2322,20 +2370,20 @@ fn evalSubmergedBranch(
       // Signed unfolded virtual-mirror focal path
       let remFocusTir = tFocus - tSurfHit;
 
-      // Finite-aperture pupil filter centered at actual displaced hit pRipple.xz (conforming to craters so craters
-      // reflect the surrounding crimson plume instead of empty metallic grey/black water!)
-      let rPupil = clamp(0.020 + 0.012 / max(rd.y, 0.22), 0.022, 0.048);
+      // Macro-lens pupil filter centered at displaced hit pRipple.xz preserving genuine capillary & gravity wave slopes
+      // so the underside meniscus shimmers with liquid distortion rather than acting as a flat 1:1 vanity mirror!
+      let rPupil = clamp(0.0032 + 0.0028 / max(rd.y, 0.20), 0.0035, 0.0078);
       let hPx1 = evalSurfaceHeightOnly(pRipple.xz + vec2<f32>(rPupil, 0.0));
       let hPx0 = evalSurfaceHeightOnly(pRipple.xz - vec2<f32>(rPupil, 0.0));
       let hPz1 = evalSurfaceHeightOnly(pRipple.xz + vec2<f32>(0.0, rPupil));
       let hPz0 = evalSurfaceHeightOnly(pRipple.xz - vec2<f32>(0.0, rPupil));
       let gradPupil = vec2<f32>(hPx1 - hPx0, hPz1 - hPz0) / (2.0 * rPupil);
-      let gradSoft = (gradPupil * 0.56) / sqrt(1.0 + dot(gradPupil, gradPupil) * 10.0);
+      let gradSoft = (gradPupil * 1.15) / sqrt(1.0 + dot(gradPupil, gradPupil) * 3.5);
       let nPupilRaw = normalize(vec3<f32>(gradSoft.x, -1.0, gradSoft.y));
       let cosPupilRaw = dot(-rd, nPupilRaw);
       let nPupilUnder = normalize(nPupilRaw + max(0.0, 0.035 - cosPupilRaw) * (-rd));
       var tirPlumeDir = reflect(rd, nPupilUnder);
-      tirPlumeDir = normalize(mix(tirPlumeDir, tirDir, (1.0 - craterDamp) * 0.72));
+      tirPlumeDir = normalize(mix(tirPlumeDir, tirDir, 0.25));
       tirPlumeDir = normalize(vec3<f32>(tirPlumeDir.x, -sqrt(tirPlumeDir.y * tirPlumeDir.y + 0.0016), tirPlumeDir.z));
 
       var tirPlume: PlumeResult;
@@ -2347,7 +2395,7 @@ fn evalSubmergedBranch(
       let pTirOrigin = vec3<f32>(pRipple.x, min(sInfo.height, u.surfaceParams.x) - 0.0012, pRipple.z);
       let tirSubjBox = intersectBox(pTirOrigin, tirPlumeDir, vec3<f32>(-0.42, -0.96, -0.42), vec3<f32>(0.42, 0.302, 0.42));
       if (fgMaxTrans * max(fresnel, 0.35) > 0.018 && tirSubjBox.y > max(tirSubjBox.x, 0.002)) {
-        let apRadiusTir = apRadius + clamp(waveEnv * 0.052, 0.0, 0.0085);
+        let apRadiusTir = apRadius + 0.0046 + clamp(waveEnv * 0.085, 0.0, 0.016);
         tirPlume = marchPlume(
           pTirOrigin,
           tirPlumeDir,
@@ -2360,41 +2408,38 @@ fn evalSubmergedBranch(
         );
       }
 
+      // Folded water-path attenuation & meniscus micro-wave dispersion soften reflected plume contrast
+      // so Sub-Meniscus views read as a watery underside reflection rather than a sharp 1:1 duplicate
+      let tirFoldedAtten = exp(-tSurfHit * 0.52) * mix(0.30, 0.46, craterDamp);
+      tirPlume.transmittance = mix(vec3<f32>(1.0), tirPlume.transmittance, tirFoldedAtten);
+      tirPlume.radiance = tirPlume.radiance * tirFoldedAtten;
+
       let darkMode = u.opticalParams.w > 0.5;
       let slopeMag = length(sInfo.normal.xz);
       let slopeSignal = smoothstep(0.00012, 0.011, slopeMag);
-      let radialOriginFade = smoothstep(0.004, 0.038, length(pRipple.xz));
-      let radialOut = normalize(pRipple.xz + vec2<f32>(1e-6, 0.0));
-      let radialSlope = dot(sInfo.normal.xz, radialOut) * radialOriginFade;
 
       let tirBloodPresence = clamp(1.0 - tirPlume.transmittance.g, 0.0, 1.0);
       let clearReflDir = normalize(mix(tirDir, tirPlume.bentDir, tirBloodPresence));
       var tirBg = evalStudioBackdrop(clearReflDir, true);
       if (!darkMode) {
-        // Liquid-mercury ring contrast on outer ripples; damped inside deep concave impact craters (craterDamp)
-        // so craters never paint a [17, 17, 19] black band + [164, 170, 176] chrome smudge over the plume!
         let horizonBand = smoothstep(-0.36, -0.020, clearReflDir.y);
-        let mercuryBand = exp(-pow((clearReflDir.y + 0.080) / 0.056, 2.0)) * craterDamp;
-        let slopeContrast = clamp(radialSlope * 11.5 - sInfo.lap * 13.5, -0.30, 0.40) * slopeSignal * craterDamp;
-        let clearWaterMod = mix(mix(0.94, 0.88, craterDamp), mix(1.02, 1.12, craterDamp), horizonBand) + slopeContrast;
-        let clearTirBg = tirBg * clearWaterMod + vec3<f32>(0.20, 0.23, 0.27) * mercuryBand * slopeSignal;
+        let clearWaterMod = mix(0.93, 1.05, horizonBand);
+        let clearTirBg = tirBg * clearWaterMod;
 
         let flatTirDir = normalize(vec3<f32>(rd.x, -max(abs(rd.y), 0.08), rd.z));
-        let diffusedTirBg = evalStudioBackdrop(flatTirDir, true) * mix(0.96, 1.04, horizonBand);
-        tirBg = mix(clearTirBg, diffusedTirBg, max(tirBloodPresence * 0.94, (1.0 - craterDamp) * 0.78));
+        let diffusedTirBg = evalStudioBackdrop(flatTirDir, true) * mix(0.96, 1.03, horizonBand);
+        tirBg = mix(clearTirBg, diffusedTirBg, max(tirBloodPresence * 0.85, (1.0 - craterDamp) * 0.65));
       } else {
         let dfRingBand = exp(-pow((tirPlume.bentDir.y + 0.13) / 0.095, 2.0));
-        let crestPhase = clamp(0.42 + 16.0 * radialSlope - 20.0 * sInfo.lap, 0.0, 1.85) * slopeSignal * mix(0.35, 1.0, craterDamp);
-        let centerPlumeGlow = exp(-dot(pRipple.xz, pRipple.xz) * 5.8);
+        let crestCurv = clamp(0.28 - 14.0 * sInfo.lap, 0.0, 1.35) * slopeSignal * mix(0.35, 1.0, craterDamp);
         tirBg = tirBg
-              + vec3<f32>(0.18, 0.22, 0.28) * (0.35 + 0.65 * dfRingBand) * crestPhase
-              + vec3<f32>(0.12, 0.010, 0.008) * tirBloodPresence * centerPlumeGlow * crestPhase;
+              + vec3<f32>(0.16, 0.20, 0.26) * (0.35 + 0.65 * dfRingBand) * crestCurv;
       }
       tirBg = mix(smoothBehind, tirBg, turbidSharpness);
 
       let tirCoreGlow = select(
-        vec3<f32>(0.042, 0.0008, 0.0018),
-        vec3<f32>(0.014, 0.0003, 0.0006),
+        vec3<f32>(0.024, 0.0005, 0.0010),
+        vec3<f32>(0.009, 0.0002, 0.0004),
         darkMode
       ) * smoothstep(0.002, 0.018, tirPlume.tauIntact) * (1.0 - tirPlume.transmittance.r);
       let tirCol = tirBg * tirPlume.transmittance + tirPlume.radiance + tirCoreGlow;
@@ -3001,18 +3046,18 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
       1.0,
       darkTop
     );
-    let steepDomeCurve = smoothstep(0.11, 0.24, slopeLen) * smoothstep(0.0035, 0.0110, abs(pSurf.y - u.surfaceParams.x));
+    let steepDomeCurve = smoothstep(0.058, 0.18, slopeLen) * smoothstep(0.0022, 0.0085, abs(pSurf.y - u.surfaceParams.x));
     let softboxDome = (
-      smoothstep(0.912, 0.974, nDotHSoft) * select(0.28, 0.15, darkTop) +
-      pow(nDotHSoft, 115.0) * select(0.36, 0.22, darkTop)
+      smoothstep(0.912, 0.974, nDotHSoft) * select(0.36, 0.16, darkTop) +
+      pow(nDotHSoft, 115.0) * select(0.52, 0.24, darkTop)
     ) * steepDomeCurve;
-    let capillarySheen = smoothstep(0.82, 0.985, max(nDotHWave, nDotHSoft))
-                       * select(0.165, 0.12, darkTop) * capillaryRing * mix(0.04, 1.0, waterClear);
-    let keySharpSpec = pow(nDotHWave, 165.0) * select(0.84, 0.90, darkTop) * (0.12 + 0.88 * waveSlope);
+    let capillarySheen = smoothstep(0.80, 0.982, max(nDotHWave, nDotHSoft))
+                       * select(0.24, 0.14, darkTop) * capillaryRing * mix(0.45, 1.0, waterClear);
+    let keySharpSpec = pow(nDotHWave, 155.0) * select(1.12, 0.94, darkTop) * (0.12 + 0.88 * waveSlope);
     let keyBroadSpec = (
-      pow(nDotHWave, 76.0) * select(0.32, 0.35, darkTop) +
-      pow(nDotHWave, 24.0) * select(0.115, 0.22, darkTop)
-    ) * waveSlope * mix(0.03, 1.0, waterClear);
+      pow(nDotHWave, 76.0) * select(0.38, 0.36, darkTop) +
+      pow(nDotHWave, 24.0) * select(0.135, 0.22, darkTop)
+    ) * waveSlope * mix(0.35, 1.0, waterClear);
     let waveSpecRetina = (
       keySharpSpec +
       keyBroadSpec +
@@ -3051,13 +3096,13 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
         );
         let reflFresnel = clamp(fresnel * opticalDome * smoothstep(0.030, 0.12, -rd.y), 0.0, 0.28);
         let dropReflWeight = reflFresnel * dropRefl.a * contactReflRamp * horizonFade;
-        let skyOccWeight = min(dropReflWeight * 0.35, 0.06) * clearWaterGate;
+        let skyOccWeight = min(dropReflWeight * 0.06, 0.015) * clearWaterGate;
         let waterReflBase = select(
           max(topSurfaceCol - skyRefl * skyOccWeight, vec3<f32>(0.0)),
           topSurfaceCol,
           darkTop
         );
-        let effReflBlend = dropReflWeight * select(mix(0.06, 1.0, clearWaterGate), 1.0, darkTop);
+        let effReflBlend = dropReflWeight * select(mix(0.06, 0.65, clearWaterGate), 1.0, darkTop);
         let darkReflDelta = max(dropRefl.rgb - skyRefl, vec3<f32>(0.0)) * dropReflWeight;
         topSurfaceCol = select(
           mix(waterReflBase, dropRefl.rgb, effReflBlend),

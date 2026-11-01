@@ -4,7 +4,7 @@
 
 1. **Mandatory Turn-0 Skill Read**: Read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simulation/SKILL.md` before designing, editing, or delegating any shader, fluid, camera, or verification work.
 2. **Core Commands**:
-   - **Unit Tests (`44/44`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
+   - **Unit Tests (`45/45`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
    - **Static WGSL AST, Struct Alignment & Control-Flow Lint**: `npm run lint:wgsl`
    - **Symbol Line-Number Indexer (Before Reading Monoliths)**: `npm run map:symbols -- <keyword>`
    - **Typecheck + Production Bundle (`TS 7` + `Vite 8` Rolldown)**: `npm run build`
@@ -23,21 +23,20 @@
 - **Quiescent Meniscus (`WATER_SURFACE_Y`)**: `y = +0.30` ([`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts#L5), [`src/sim/uniformLayout.ts`](src/sim/uniformLayout.ts#L11)).
 - **Pasteur Pipette Orifice (`PIPETTE_TIP_Y`)**: `y = +0.55` ([`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts#L306-L364)).
 - **Tank Floor**: `y = -0.98` (3D MAC fluid box spans `x, z in [-0.48, +0.48]`, `y in [-0.98, +0.30]`, resolution `192 × 256 × 192`, voxel size `~5.0 mm`).
-- **2D Free-Surface Wave Grid**: `WAVE_GRID_SIZE = 256` ([`src/shaders/common.ts`](src/shaders/common.ts#L1-L2)). Currently `WAVE_HALF_EXTENT = 1.60` (`3.20 m` span, `dx = 12.5 mm`, Nyquist `= 25.0 mm` — too coarse for `2–8 mm` capillary wavelets; see Backlog #2).
+- **2D Free-Surface Capillary–Gravity Wave Grid**: `WAVE_GRID_SIZE = 256`, `WAVE_HALF_EXTENT = 0.70` ([`src/shaders/common.ts`](src/shaders/common.ts#L1-L2)), spanning `[-0.70, +0.70]` (`1.40 m` span, `dx = 5.47 mm`, Nyquist `= 10.9 mm`, resolving millimeter capillary wavelets while keeping the `[-0.48, +0.48]` cuvette interior unattenuated inside `WAVE_SPONGE_INNER = 0.5040`).
 - **Dual Clocks**:
   - Physics substep: `FIXED_SIM_DT = 1 / 60` ([`src/engine/BloodDropEngine.ts`](src/engine/BloodDropEngine.ts#L82)) representing `1000 fps` slow-motion simulation seconds.
   - User pointer hold (`PENDANT_HOLD_DELAY_MS = 160 ms` in [`src/main.ts`](src/main.ts#L65)): measured in real wall-clock seconds (`0..2.2 s` -> $V \propto t$).
   - Continuous vessel: `autoLoop = false` by default (`393,216`-particle ring buffer wraps cleanly across `> 8` drops; floor *rouleaux* sedimentation accumulates in `concTex.a`).
 
-### B. User HUD `CAMERA_PRESETS` (`src/math/camera.ts` lines `14–42` & `102–120`)
+### B. User HUD `CAMERA_PRESETS` (`src/math/camera.ts` lines `14–42` & `102–125`)
 Every visual change MUST be verified through these actual user presets, never solely through custom `window.__QA__.setCam(...)` overrides:
 1. **`hero` (`Follow Shot`, default on boot)**:
-   - `t in [0, 1.18 s]`: `elev = +0.29`, `dist = 1.28`, `target = [0, 0.22, 0]`, `fovY = 40°` (above meniscus).
-   - `t in [1.18, 2.85 s]`: `syncHeroFollow` currently dives underwater to `elev = -0.125 -> -0.155`, `target.y = -0.015 -> -0.26` — **causes Backlog #1b (hides `y = 0.55` pipette on subsequent holds) and Backlog #3 (50/50 planar TIR Rorschach plume clone)**.
+   - Stays strictly topside (`camPos.y > +0.54 > WATER_SURFACE_Y = +0.30`) across all timestamps (`elev = +0.29 -> +0.365`, `dist = 1.28 -> 1.49`, `target.y = +0.22 -> +0.075`, `fovY = 40° -> 41°`), tilting down to follow the descending vortex ring through the cuvette without diving into a 50/50 TIR ceiling mirror split and keeping `PIPETTE_TIP_Y = +0.55` inside the frustum (`|ndcY| <= 0.95`) on subsequent holds.
 2. **`crown` (`Surface Crown`)**:
-   - `az = 0.32`, `elev = +0.46`, `dist = 1.44`, `target = [0, 0.06, 0]`, `fovY = 39°` — top of frame at `(0, 0)` cuts off at **`y ≈ +0.544`**, currently clipping `PIPETTE_TIP_Y = +0.55` out of frame!
+   - `az = 0.32`, `elev = +0.44`, `dist = 1.48`, `target = [0, 0.11, 0]`, `fovY = 40°` — frames both the entire capillary wave field and `PIPETTE_TIP_Y = +0.55` (`tipNdcY ≈ +0.846`).
 3. **`abyss` (`Sub-Meniscus`)**:
-   - `az = -0.16`, `elev = -0.21`, `dist = 1.32`, `target = [0, 0.06, 0]`, `fovY = 43°` (intentional submerged upward look).
+   - `az = -0.16`, `elev = -0.21`, `dist = 1.32`, `target = [0, 0.06, 0]`, `fovY = 43°` (dedicated submerged upward view into the wave-warped TIR ceiling & Snell's Window).
 
 ---
 
@@ -50,7 +49,7 @@ Every visual change MUST be verified through these actual user presets, never so
   - `.a`: Settled floor *rouleaux* sediment bed (`floorRouleauxBed`, symmetric mass transfer $\Delta m = \min(\rho, J\,\Delta t)$).
 - **Two-Stage Optical Pipeline ([`src/shaders/render.ts`](src/shaders/render.ts))**:
   - Half-res volumetric pass (`1088 × 680` `volTex`: `.rgb` linear radiance, `.a` ray hit distance `tSurf`).
-  - `1:1` Retina `COMPOSITE_WGSL` (`2560 × 1600`): perspective-detrended `volTex.a - tFlat` bilateral upsampling + native `1:1` foreground aerial/pendant drop intersection + meniscus speculars.
+  - `1:1` Retina `COMPOSITE_WGSL` (`2560 × 1600`): perspective-detrended `volTex.a - tFlat` bilateral upsampling + native `1:1` foreground turbid whole-blood aerial/pendant drop intersection + meniscus speculars.
   - **Apple Silicon XDR / EDR Swapchain (`override HDR_EXTENDED`)**: Pre-compiles `pCompositeSdr` (`bgra8unorm`, IEC `linearToSRGB`) and `pCompositeHdr` (`rgba16float`, `toneMapping: { mode: 'extended' }`, linear extended-sRGB matching SDR 1:1 across `[0, 0.76]` with specular headroom `> 1.0` above `0.76`), switched dynamically via `window.matchMedia('(dynamic-range: high)')` or `engine.setExtendedHdr(boolean)`.
   - **Hardware `timestamp-query` 5-Pass Telemetry**: When `adapter.features.has('timestamp-query')`, `BloodDropEngine` resolves per-pass GPU durations into `engine.gpuPassTimingsMs` (`macAndWaveMs`, `parcelAndConcMs`, `lightingAndBricksMs`, `halfResVolumetricMs`, `retinaCompositeMs`, `totalGpuMs`) via double-buffered 80-byte readback (`engine.getWorkbenchAdapter()`).
 - **Hard Regression Invariants Across All 4 Optical Regimes** (`Bright-Field Topside`, `Dark-Field Topside`, `Sub-Meniscus TIR`, `Steep Snell's Window`):
@@ -62,35 +61,14 @@ Every visual change MUST be verified through these actual user presets, never so
 
 ---
 
-## 3. Priority Next-Session Live-Realism Backlog (Verified Root Causes)
+## 3. Physical-Realism Guardrails (Round 9 Contracts)
 
-The user live-tested Round 8 and identified **three primary realism breaks** to resolve in the next session:
-
-### Issue 1 — "The drop is very fake looking before it enters"
-- **Exact Code Locations**:
-  - [`src/shaders/render.ts`](src/shaders/render.ts#L637-L721) (`shadeAerialDrop`)
-  - [`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts#L300-L565) (pendant growth, pinch-off, free-fall kinematics & shape oscillation)
-  - [`src/math/camera.ts`](src/math/camera.ts#L15-L42) (`crown` frustum top `y ≈ 0.544 < PIPETTE_TIP_Y = 0.55` and submerged `hero` hiding aerial drops)
-- **Root Causes**:
-  1. **Clear Red Glass-Marble Refraction (`render.ts:682-710`)**: `bgThrough = mix(backdropBehind, refrBg, 0.88 * airExitGate)` refracts `88%` of the bright studio backdrop upside-down through the drop core. Real `3–4 mm` whole blood (`Hct ~ 45%`, erythrocyte Mie reduced scattering $\mu_s' \approx 2.2\text{ mm}^{-1}$, $\tau' > 8$) is optically turbid/opaque dark oxblood in its core, with ruby translucency confined to `< 0.5 mm` grazing rims and stretched capillary necks.
-  2. **Circular Phong Sticker Highlight (`render.ts:676-679`)**: `smoothstep(0.925, 0.988, keyAlign) * 1.42 + pow(..., 150.0) * 0.92` stamps a hard round white cartoon dot onto a rigid ellipsoid instead of a curved studio strip/window area-light reflection weighted by physical dielectric Fresnel ($F_0 \approx 0.025$).
-  3. **Rigid Spheroid Float, Gumdrop Slump & Preset Framing**: During the slow-motion fall (`0..0.92 s`), the drop reads as a stiff analytical sphere with a sticker dot, melts into a smooth gumdrop dome at `t = 1.02 s`, and leaves a flat dark-red coin disc on the surface at `t = 1.15..1.47 s` (captured in `temporal_entry_strip.jpg`); meanwhile `Crown` clips `PIPETTE_TIP_Y = 0.55` above the top bezel (`tipNdcY = +1.0142` in `preset_matrix_sheet.jpg`) and post-`1.18 s` `Follow` hides aerial drops completely.
-
-### Issue 2 — "The ripples are very fake looking"
-- **Exact Code Locations**:
-  - [`src/shaders/common.ts`](src/shaders/common.ts#L1-L2) (`WAVE_GRID_SIZE = 256`, `WAVE_HALF_EXTENT = 1.60`)
-  - [`src/shaders/wave.ts`](src/shaders/wave.ts#L108-L127) (`WAVE_SPATIAL_FORCE_WGSL` dual Ricker-wavelet pistons)
-  - [`src/shaders/render.ts`](src/shaders/render.ts#L2364-L2392) (`radialOut = normalize(pRipple.xz)` + `mercuryBand` + `slopeContrast`) and [`src/shaders/render.ts`](src/shaders/render.ts#L3003-L3021) (`capillarySheen` / `softboxDome`)
-- **Root Causes**:
-  1. **Coarse `12.5 mm` Grid Nyquist Limit**: Spanning `3.20 m` with `256` cells (`dx = 12.5 mm`, $\lambda_{\min} = 25\text{ mm}$) makes it mathematically impossible to resolve `2–8 mm` capillary precursor wavelets ($\omega^2 = gk + (\sigma/\rho)k^3$), turning every impact into wide, rubbery `10–18 cm` bullseye swells.
-  2. **Synthetic Double-Piston Forcing (`wave.ts:120-126`)**: Injects a second hardcoded `reboundImpulse = 4.10 * swellShape` Ricker wavelet after impact on top of the FFT PDE instead of letting cavity collapse emerge from a single momentum-coupled crater impulse on a properly scaled grid.
-  3. **Painted Origin-Locked Airbrush Rings (`render.ts:2367-2391`)**: Computes `radialOut = normalize(pRipple.xz)` locked to `(0, 0)` (breaking off-center drops!) and adds synthetic grey/metallic `slopeContrast` + `mercuryBand` paint instead of pure Fresnel environment reflection and Snell refraction.
-
-### Issue 3 — "The reflection or mirror of the drop after it enters that duplicates the above and below"
-- **Exact Code Locations**:
-  - [`src/math/camera.ts`](src/math/camera.ts#L102-L120) (`syncHeroFollow` diving to `elev = -0.125`, `target.y = -0.015`)
-  - [`src/shaders/render.ts`](src/shaders/render.ts#L2325-L2401) (`evalSubmergedBranch` `gradPupil` / `nPupilUnder` / `tirPlume`)
-- **Root Causes**:
-  1. **Default `Follow` Camera Parks in a 50/50 Grazing TIR Split**: After `t = 1.18 s`, `syncHeroFollow` automatically submerges the default camera just below `y = +0.30` at shallow upward grazing angle (`elev = -0.125 rad`, $\theta_i > 48.6^\circ \implies F = 1.0$ Total Internal Reflection), bisecting the screen with the water ceiling.
-  2. **Over-Smoothed Planar Ceiling Mirror (`render.ts:2327-2339`)**: `gradPupil` box-filters wave height over `4.4–9.6 cm`, damps slopes by `0.56`, and blends `72%` back toward flat `tirDir`, turning the disturbed meniscus into a flat vanity mirror that raymarches `tirPlume` a second time and renders a giant **1:1 upside-down Rorschach clone** of the blood plume above the real plume (visible in `phase2_s1_01_underwater_elev22.png`).
-  3. **Resolution Path**: Keep `Follow` viewing cleanly through the lateral cuvette without parking in a shallow 50/50 ceiling mirror split (while keeping aerial/pendant drops visible on click-and-hold!), and in `Sub-Meniscus` (`abyss`) preserve genuine multi-scale wave slope distortion + physical path attenuation on `tirPlume` so underside reflections ripple naturally instead of cloning 1:1.
+1. **Turbid Whole-Blood Aerial & Pendant Drops ([`src/shaders/render.ts`](src/shaders/render.ts), [`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts))**:
+   - Whole human blood (`Hct ~ 45%`, $n \approx 1.378$, erythrocyte Mie $\mu_s' \approx 2.2\text{ mm}^{-1}$) extinguishes ballistic background sky transmission exponentially (`ballisticTrans = exp(-chord * 92.0 * ...)` `< 0.05%` in core) so `3–4 mm` drops read as opaque dark oxblood in the core with ruby translucency restricted to `< 0.5 mm` rims and capillary pinch-off necks—never refracting `88%` of the backdrop upside-down like a glass marble.
+   - Specular reflections evaluate extended rectangular studio softbox strip windows (`evalDropStudioWindowSpec`) weighted by physical dielectric Fresnel ($F_0 \approx 0.025$), never circular Phong point dots (`pow(..., 150)`), paired with Rayleigh–Lamb $l = 2, 3$ capillary shape oscillations and crisp (`~0.12 s`) inertial crater plunge.
+2. **Capillary–Gravity Ripples & Continuous Wet Meniscus Gloss ([`src/shaders/wave.ts`](src/shaders/wave.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
+   - Drive the `5.47 mm`-cell FFT PDE with a single momentum-coupled cavity + wetting-line capillary impulse at each drop's true `dropXZ` (zero delayed `reboundImpulse` double-pistons, zero `(0, 0)` origin-locked `normalize(pRipple.xz)` or grey `slopeContrast` / `rippleRelief` bands).
+   - Preserve continuous dielectric Fresnel reflection and Retina capillary speculars over `bloodInColumn` so submerged blood reads beneath glossy liquid rather than as a dry red coin on top.
+3. **Topside `Follow` Trajectory & Wave-Warped `Sub-Meniscus` TIR ([`src/math/camera.ts`](src/math/camera.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
+   - Never auto-dive `syncHeroFollow` barely below `y = +0.30` into a grazing 50/50 TIR ceiling clone.
+   - In `Sub-Meniscus` (`abyss`), keep `rPupil` at macro lens scale (`3.5–7.8 mm`) with un-crushed wave slopes and folded water-path attenuation (`tirFoldedAtten`) so underside reflections ripple and soften naturally rather than cloning the plume 1:1.

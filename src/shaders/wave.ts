@@ -5,7 +5,9 @@ import {
   WAVE_HALF_EXTENT,
 } from './common';
 
-const WAVE_DOMAIN_LEN = (WAVE_HALF_EXTENT * 2.0).toFixed(4); // 3.2000
+const WAVE_DOMAIN_LEN = (WAVE_HALF_EXTENT * 2.0).toFixed(4);
+const WAVE_SPONGE_INNER = (WAVE_HALF_EXTENT * 0.72).toFixed(4);
+const WAVE_SPONGE_OUTER = (WAVE_HALF_EXTENT * 0.96).toFixed(4);
 
 export const WAVE_CLEAR_WGSL = /* wgsl */ `
 ${COMMON_WGSL}
@@ -106,39 +108,39 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let r = length(worldXZ - dropXZ);
 
       // Exact 2D polar zero-integral Ricker wavelet: int_0^inf r * exp(-r^2) * (1 - r^2) dr == 0
-      // Tight drop-scale footprint concentrated in the initial < 0.18s cavity excavation so the FFT solver rebounds freely
-      let rFootprint = clamp(rDrop * 1.05, 0.022, 0.082);
+      // Single momentum-coupled entry crater + sharp wetting-line capillary impulse (zero delayed rebound piston;
+      // central Worthington swell & dispersive capillary precursor train emerge purely from the unitary FFT PDE!)
+      let rFootprint = clamp(rDrop * 0.68, 0.016, 0.052);
       let rNorm = r / rFootprint;
       let emergNorm = (slot.posAndRadius.y - u.surfaceParams.x) / max(rDrop, 0.018);
       let excavGate = smoothstep(-0.78, -0.04, emergNorm);
       let impactBell = sin(clamp((1.05 - emergNorm) / 1.83, 0.0, 1.0) * 3.14159265) * excavGate;
       let impactShape = exp(-rNorm * rNorm) * (1.0 - rNorm * rNorm);
-      let dynImpulse = (5.20 * impactBell * (rDrop / 0.056)) * (0.72 + 2.65 * speedY);
+      let dynImpulse = (14.2 * impactBell * (rDrop / 0.056)) * (0.72 + 2.65 * speedY);
 
-      // Axisymmetric radial-convergence capillary rebound (Worthington cavity collapse after dome slumps below meniscus):
-      // Uses exact zero-integral polar Ricker wavelet so total displaced surface volume remains identically zero!
-      let reboundWindow = smoothstep(-3.35, -2.05, emergNorm) * (1.0 - smoothstep(-1.15, -0.68, emergNorm));
-      let rSwell = clamp(rDrop * 0.92 + 0.014, 0.026, 0.072);
-      let rNormSwell = r / rSwell;
-      let swellShape = exp(-rNormSwell * rNormSwell) * (1.0 - rNormSwell * rNormSwell);
-      let reboundImpulse = (4.10 * reboundWindow * (0.55 + 0.45 * (rDrop / 0.056))) * (0.68 + 2.35 * speedY);
+      // Wetting-neck capillary meniscus contact impulse exciting high-k (2-8 mm) dispersive precursor wavelets
+      let rCap = clamp(rDrop * 0.25, 0.0105, 0.0185);
+      let rNormCap = r / rCap;
+      let capWindow = smoothstep(-0.35, 0.28, emergNorm) * (1.0 - smoothstep(0.68, 1.06, emergNorm));
+      let capShape = exp(-rNormCap * rNormCap) * (1.0 - rNormCap * rNormCap);
+      let capImpulse = (8.8 * capWindow * (0.60 + 0.40 * (rDrop / 0.056))) * (0.65 + 2.20 * speedY);
 
-      forceDrops = forceDrops - dynImpulse * 0.96 * impactShape + reboundImpulse * swellShape;
+      forceDrops = forceDrops - dynImpulse * impactShape - capImpulse * capShape;
       activeExcav = max(activeExcav, excavGate * exp(-0.5 * rNorm * rNorm));
 
-      // Deposit blood surfactant film (sigma_blood ~ 55 mN/m vs water 72 mN/m) inside contact zone
-      let rStain = max(0.036, rDrop * 0.92);
-      let stain = exp(-(r * r) / (rStain * rStain)) * clamp(drainRate * 0.55, 0.0, 1.0);
-      crimsonFilm = max(crimsonFilm, stain * 0.88);
+      // Deposit localized blood surfactant film (sigma_blood ~ 55 mN/m vs water 72 mN/m) inside immediate collar
+      let rStain = max(0.018, rDrop * 0.60);
+      let stain = exp(-(r * r) / (rStain * rStain)) * clamp(drainRate * 0.42, 0.0, 1.0);
+      crimsonFilm = max(crimsonFilm, stain * 0.65);
     }
   }
 
   // 2. Marangoni surfactant pull (Delta sigma ~ -17 mN/m pulls outward along contact perimeter without pinning crater floor)
   let marangoniStr = u.surfaceParams.y;
   let effLapFilm = mix(max(lapFilm, -0.0015), lapFilm, activeExcav);
-  let forceMarangoni = marangoniStr * 0.38 * effLapFilm;
-  crimsonFilm = clamp(crimsonFilm + marangoniStr * 0.085 * lapFilm * timeScale, 0.0, 1.0);
-  crimsonFilm = crimsonFilm * pow(0.985, timeScale);
+  let forceMarangoni = marangoniStr * 0.28 * effLapFilm;
+  crimsonFilm = clamp(crimsonFilm + marangoniStr * 0.065 * lapFilm * timeScale, 0.0, 1.0);
+  crimsonFilm = crimsonFilm * pow(0.945, timeScale);
 
   // 3. Two-way 3D MAC subsurface upward feedback onto the free surface (decoupled from submerged stem wake drainage so craters rebound!)
   var forceSubsurface = 0.0;
@@ -154,9 +156,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   vel = vel + (forceDrops + forceMarangoni + forceSubsurface) * dt;
 
-  // Radial absorbing sponge prevents periodic wrap-around across the [-1.60, +1.60] spectral box
+  // Radial absorbing sponge prevents periodic wrap-around across the spectral box while keeping [-0.48, +0.48] tank unattenuated
   let distOrigin = length(worldXZ);
-  let sponge = 1.0 - smoothstep(1.08, 1.52, distOrigin);
+  let sponge = 1.0 - smoothstep(${WAVE_SPONGE_INNER}, ${WAVE_SPONGE_OUTER}, distOrigin);
   eta = clamp(eta * sponge, -0.14, 0.14);
   vel = clamp(vel * sponge, -1.8, 1.8);
   crimsonFilm = crimsonFilm * sponge;
@@ -286,15 +288,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let depthH = u.domainBounds.z - u.domainBounds.y; // 1.28 tank depth
   let tanhKH = tanh(min(k * depthH, 12.0));
 
-  // Physical elastocapillary dispersion in cuvette world units (1 unit ~ 3 cm in slow-motion):
-  // omega(k_crater=24) ~ 10.6 rad/s (half-period T/2 ~ 0.29s -> crisp central swell rebound + dispersive capillary rings)
+  // Physical elastocapillary dispersion in cuvette world units (resolving fine 2-8 mm capillary precursor wavelets):
+  // omega(k_crater=34) ~ 11.1 rad/s (half-period T/2 ~ 0.28s -> crisp central swell rebound + dispersive capillary train)
   let gEff = 0.84;
-  let sigmaOverRho = 0.0066;
+  let sigmaOverRho = 0.0024;
   let omega = sqrt(max((gEff * k + sigmaOverRho * k * k2) * tanhKH, 1e-8));
 
-  // Physical viscous capillary damping + smooth high-k spectral de-aliasing roll-off
-  let viscRate = 0.032 + 0.00024 * k2;
-  let nyquistRoll = 1.0 - smoothstep(185.0, 245.0, k);
+  // Physical slow-motion viscous capillary damping + smooth high-k spectral de-aliasing roll-off near k_Nyquist = 574
+  let viscRate = 0.030 + 0.000028 * k2;
+  let nyquistRoll = 1.0 - smoothstep(400.0, 555.0, k);
   let damp = exp(-viscRate * dt) * nyquistRoll;
 
   let phase = omega * dt;
@@ -354,7 +356,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let uv = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / ${WAVE_GRID_SIZE.toFixed(1)};
   let worldXZ = waveUVToWorldXZ(uv);
-  let sponge = 1.0 - smoothstep(1.10, 1.54, length(worldXZ)) + u.surfaceParams.x * 0.0;
+  let sponge = 1.0 - smoothstep(${WAVE_SPONGE_INNER}, ${WAVE_SPONGE_OUTER}, length(worldXZ)) + u.surfaceParams.x * 0.0;
 
   let etaOut = clamp(prop.x * sponge, -0.14, 0.14);
   let velOut = clamp(prop.y * sponge, -1.8, 1.8);

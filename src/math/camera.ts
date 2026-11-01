@@ -16,7 +16,7 @@ export const CAMERA_PRESETS: Record<CameraPreset['id'], CameraPreset> = {
     id: 'hero',
     label: 'Follow Shot',
     azimuth: 0.0,
-    elevation: 0.29, // Starts clearly above meniscus for aerial drop + full crater impact, then glides underwater
+    elevation: 0.29, // Above-meniscus macro view tracking aerial drop, capillary impact & refracted plume without TIR ceiling clone
     distance: 1.28,
     target: [0.0, 0.22, 0.0],
     fovY: (40 * Math.PI) / 180,
@@ -25,10 +25,10 @@ export const CAMERA_PRESETS: Record<CameraPreset['id'], CameraPreset> = {
     id: 'crown',
     label: 'Surface Crown',
     azimuth: 0.32,
-    elevation: 0.46, // High-oblique view across concentric capillary ripples & Worthington crown
-    distance: 1.44,
-    target: [0.0, 0.06, 0.0],
-    fovY: (39 * Math.PI) / 180,
+    elevation: 0.44, // High-oblique view keeping PIPETTE_TIP_Y = 0.55 inside frustum + concentric capillary ripples
+    distance: 1.48,
+    target: [0.0, 0.11, 0.0],
+    fovY: (40 * Math.PI) / 180,
   },
   abyss: {
     id: 'abyss',
@@ -95,19 +95,21 @@ export class OrbitCamera {
 
   /**
    * Evaluates smooth motion-control macro follow trajectory when in Hero Follow mode:
-   *  - t in [0, 1.18s]: Above-water macro framing of falling drop, reflection & capillary crater impact
-   *  - t in [1.18s, 2.85s]: Smooth quintic submersion crane dive into clear water alongside vortex roll-up
-   *  - t in [2.85s, 22s]: Gentle downward pedestal centering toroidal umbrella, stem & Rayleigh-Taylor tendrils
+   *  - t in [0, 1.12s]: Close above-water macro framing of falling drop, reflection & capillary crater impact
+   *  - t in [1.12s, 3.20s]: Smooth topside tilt & pullback framing capillary wavelets + descending vortex ring
+   *    without dipping below WATER_SURFACE_Y (eliminating 50/50 TIR ceiling mirror & keeping PIPETTE_TIP_Y in frame)
+   *  - t in [3.20s, 14.0s]: Gentle topside follow keeping both pipette orifice and deep tank plume visible
    */
   public syncHeroFollow(simTime: number, instant = false): void {
     if (!this.followHeroEnabled) return;
-    const submerge = quinticSmoothstep(1.18, 2.85, simTime);
-    const deepTrack = quinticSmoothstep(2.85, 15.0, simTime);
+    const followPlume = quinticSmoothstep(1.12, 3.20, simTime);
+    const deepTrack = quinticSmoothstep(3.20, 14.0, simTime);
 
-    const elev = 0.29 * (1.0 - submerge) + (-0.125) * submerge - 0.030 * deepTrack;
-    const targY = 0.22 * (1.0 - submerge) + (-0.015) * submerge - 0.245 * deepTrack;
-    const dist = 1.28 * (1.0 - submerge) + 1.24 * submerge + 0.10 * deepTrack;
-    const azim = 0.05 * Math.sin(Math.max(0.0, simTime - 1.18) * 0.16) * submerge;
+    const elev = 0.29 * (1.0 - followPlume) + 0.35 * followPlume + 0.015 * deepTrack;
+    const targY = 0.22 * (1.0 - followPlume) + 0.095 * followPlume - 0.020 * deepTrack;
+    const dist = 1.28 * (1.0 - followPlume) + 1.44 * followPlume + 0.05 * deepTrack;
+    const azim = 0.045 * Math.sin(Math.max(0.0, simTime - 1.12) * 0.16) * followPlume;
+    const fov = ((40 + 1.0 * followPlume) * Math.PI) / 180;
 
     this.targetAzimuth = azim;
     this.targetElevation = elev;
@@ -115,6 +117,7 @@ export class OrbitCamera {
     this.targetCenter[0] = 0.0;
     this.targetCenter[1] = targY;
     this.targetCenter[2] = 0.0;
+    this.targetFovY = fov;
 
     if (instant) {
       this.azimuth = azim;
@@ -123,6 +126,7 @@ export class OrbitCamera {
       this.target[0] = 0.0;
       this.target[1] = targY;
       this.target[2] = 0.0;
+      this.fovY = fov;
     }
   }
 

@@ -328,10 +328,17 @@ async function main() {
       mobile: false,
     });
 
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
       const ready = await cdp.eval('Boolean(window.__BLOOD_ENGINE__)');
       if (ready) break;
       await sleep(150);
+    }
+    const engineExists = await cdp.eval('Boolean(window.__BLOOD_ENGINE__)');
+    if (!engineExists) {
+      const domText = await cdp.eval('document.body ? document.body.innerText : ""');
+      throw new Error(
+        `window.__BLOOD_ENGINE__ failed to initialize!\nDOM: ${domText}\nConsoleErrors: ${JSON.stringify(cdp.consoleErrors)}\nPageErrors: ${JSON.stringify(cdp.pageErrors)}`
+      );
     }
 
     await cdp.eval(`(async () => {
@@ -459,7 +466,7 @@ async function main() {
             if (e < minEta) minEta = e;
             if (e > maxEta) maxEta = e;
             if (i > 0) {
-              const s = Math.abs(e - f[(i - 1) * 4]) / (3.2 / 256.0);
+              const s = Math.abs(e - f[(i - 1) * 4]) / (1.4 / 256.0);
               if (s > maxSlope) maxSlope = s;
             }
           }
@@ -801,7 +808,17 @@ async function main() {
 
     if (PRESET_MATRIX) {
       const pmResult = await runPresetMatrix(cdp, snap);
-      writeOut('preset_matrix_metrics.json', JSON.stringify({ initInfo, ...pmResult, captures }, null, 2));
+      const pmFailures = [];
+      if (pmResult.heroSubState.camPosY <= 0.30 || pmResult.heroSubState.camElev <= 0.20) {
+        pmFailures.push(`Hero Follow camera dived into 50/50 TIR split: ${JSON.stringify(pmResult.heroSubState)}`);
+      }
+      if (!pmResult.crownHold.visibleInFrustum || Math.abs(pmResult.crownHold.pipetteTipNdcY) > 0.96) {
+        pmFailures.push(`Crown preset clipped PIPETTE_TIP_Y = 0.55: ${JSON.stringify(pmResult.crownHold)}`);
+      }
+      writeOut('preset_matrix_metrics.json', JSON.stringify({ initInfo, ...pmResult, pmFailures, captures }, null, 2));
+      if (pmFailures.length > 0) {
+        throw new Error('Preset Matrix Gate Failures:\n' + pmFailures.join('\n'));
+      }
       console.log('PRESET MATRIX COMPLETE:', JSON.stringify(pmResult, null, 2));
       ws.close();
       return;
@@ -863,10 +880,11 @@ async function main() {
     });
 
     const profiles = [];
+    let pmFullResult = null;
     if (!QUICK) {
       await cdp.send('Page.bringToFront');
       profiles.push(await cdp.eval(`window.__QA__.profile60Frames('dichromatic_vortex_plume')`));
-      await runPresetMatrix(cdp, snap);
+      pmFullResult = await runPresetMatrix(cdp, snap);
     }
 
     await cdp.eval(`(async () => {
@@ -914,6 +932,14 @@ async function main() {
     }
     if (!hdrExtendedCheck?.supported || hdrExtendedCheck.maxHdrLinearPeak <= 1.0) {
       gateFailures.push(`XDR rgba16float extended check failed: ${JSON.stringify(hdrExtendedCheck)}`);
+    }
+    if (pmFullResult) {
+      if (pmFullResult.heroSubState.camPosY <= 0.30 || pmFullResult.heroSubState.camElev <= 0.20) {
+        gateFailures.push(`Hero Follow camera dived into 50/50 TIR split: ${JSON.stringify(pmFullResult.heroSubState)}`);
+      }
+      if (!pmFullResult.crownHold.visibleInFrustum || Math.abs(pmFullResult.crownHold.pipetteTipNdcY) > 0.96) {
+        gateFailures.push(`Crown preset clipped PIPETTE_TIP_Y = 0.55: ${JSON.stringify(pmFullResult.crownHold)}`);
+      }
     }
     for (const prof of profiles) {
       if (prof.avgGpuMs > 12.5 || prof.p95GpuMs > 15.5) {

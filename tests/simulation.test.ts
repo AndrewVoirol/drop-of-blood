@@ -24,6 +24,8 @@ import {
   VEL_GRID_X,
   VEL_GRID_Y,
   VEL_GRID_Z,
+  WAVE_GRID_SIZE,
+  WAVE_HALF_EXTENT,
 } from '../src/shaders/common';
 import {
   FLUID_ADVECT_MAC_WGSL,
@@ -341,24 +343,28 @@ describe('OrbitCamera & WebGPU ZO matrix math', () => {
     expect(cam.distance).toBeLessThanOrEqual(2.85);
   });
 
-  it('transitions hero follow camera smoothly from above water surface to submerged and yields to manual orbit', () => {
+  it('keeps hero follow camera cleanly topside across descent without a 50/50 TIR mirror dive, frames PIPETTE_TIP_Y inside hero & crown frustums, and yields to manual orbit', () => {
+    const projectTipNdcY = (c: OrbitCamera): number => {
+      const vp = c.viewProjMatrix;
+      const clipY = vp[5] * PIPETTE_TIP_Y + vp[13];
+      const clipW = vp[7] * PIPETTE_TIP_Y + vp[15];
+      return clipY / clipW;
+    };
+
     const cam = new OrbitCamera(CAMERA_PRESETS.hero);
     expect(cam.followHeroEnabled).toBe(true);
 
-    for (const t of [0.0, 0.5, IMPACT_TIME, 1.15]) {
+    for (const t of [0.0, 0.5, IMPACT_TIME, 1.15, 1.85, 2.85, 4.0, 12.0]) {
       cam.syncHeroFollow(t, true);
-      cam.updateMatrices(16 / 9);
-      expect(cam.position[1]).toBeGreaterThan(WATER_SURFACE_Y + 0.25);
+      cam.updateMatrices(16 / 10);
+      expect(cam.position[1]).toBeGreaterThan(WATER_SURFACE_Y + 0.24);
+      expect(cam.elevation).toBeGreaterThan(0.25);
+      expect(Math.abs(projectTipNdcY(cam))).toBeLessThanOrEqual(0.95);
     }
 
-    let prevY = cam.position[1];
-    for (let t = 1.25; t <= 4.0; t += 0.25) {
-      cam.syncHeroFollow(t, true);
-      cam.updateMatrices(16 / 9);
-      expect(cam.position[1]).toBeLessThanOrEqual(prevY + 1e-5);
-      prevY = cam.position[1];
-    }
-    expect(prevY).toBeLessThan(WATER_SURFACE_Y - 0.15);
+    const crownCam = new OrbitCamera(CAMERA_PRESETS.crown);
+    crownCam.updateMatrices(16 / 10);
+    expect(Math.abs(projectTipNdcY(crownCam))).toBeLessThanOrEqual(0.95);
 
     cam.orbit(0.25, 0.1);
     expect(cam.followHeroEnabled).toBe(false);
@@ -962,7 +968,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).not.toContain('if (lit.a < 0.000025 && cocBlur <');
     expect(RENDER_WGSL).toContain('let coarseSkip = 0.015;');
     expect(RENDER_WGSL).toContain('let pWaveXZ = mix(pPlumeOrigin.xz, pSurf.xz');
-    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.035, 0.14, activeCurve * grazingFresnelRim), bloodInColumn), 1.0, darkTop);');
+    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.055, 0.42, activeCurve * (0.35 + 0.65 * grazingFresnelRim)), bloodInColumn), 1.0, darkTop);');
     expect(RENDER_WGSL).toContain('let turbidSharpness = exp(-fgPlume.tauIntact * 680.0);');
     expect(PARTICLE_ADVECT_SPLAT_WGSL).toContain('if (length(stretch) < 0.0038)');
   });
@@ -1015,7 +1021,8 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain('let crossFrac = clamp((0.000005 - prevLitA)');
     expect(RENDER_WGSL).toContain('let haloFrac = clamp((0.000034 - prevConeD)');
     expect(RENDER_WGSL).toContain('let cocMeniscusFade = 0.008 + meniscusBokeh * (0.022 + 0.024 * grazingTopside);');
-    expect(RENDER_WGSL).toContain('let radialOriginFade = smoothstep(0.004, 0.038, length(pRipple.xz));');
+    expect(RENDER_WGSL).not.toContain('normalize(pRipple.xz');
+    expect(RENDER_WGSL).not.toContain('dot(pRipple.xz, pRipple.xz)');
     expect(RENDER_WGSL).toContain('let obliquePlanarVis = smoothstep(0.065, 0.22, -rd.y);');
     expect(RENDER_WGSL).toContain('let underGrazingMix = smoothstep(0.065, 0.22, rd.y);');
     expect(LIGHTING_VOLUME_WGSL).toContain('let ctC = textureSampleLevel(concIn, linSampler, uvw, 0.0);');
@@ -1447,9 +1454,9 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let nonSuctionV = max(vSubY, 0.0);');
     expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let wallTaper = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, max(abs(worldXZ.x), abs(worldXZ.y)));');
     expect(WAVE_SPECTRAL_PROPAGATE_WGSL).toContain('let gEff = 0.84;');
-    expect(WAVE_SPECTRAL_PROPAGATE_WGSL).toContain('let sigmaOverRho = 0.0066;');
-    const kCrater = 24.0;
-    const omegaCrater = Math.sqrt((0.84 * kCrater + 0.0066 * kCrater ** 3) * Math.tanh(kCrater * 1.28));
+    expect(WAVE_SPECTRAL_PROPAGATE_WGSL).toContain('let sigmaOverRho = 0.0024;');
+    const kCrater = 34.0;
+    const omegaCrater = Math.sqrt((0.84 * kCrater + 0.0024 * kCrater ** 3) * Math.tanh(kCrater * 1.28));
     expect(Math.PI / omegaCrater).toBeLessThan(0.35);
 
     // 4. Gentle meniscus anchor + age-gated Fahraeus rouleaux settling keeps early stems anchored while clearing 12-drop vessel by t = 37.5s
@@ -1542,7 +1549,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).not.toContain('let rSwellFoot =');
     expect(RENDER_WGSL).toContain('let plumePresence = smoothstep(0.0006, 0.018, plume.tauTotal);');
     expect(RENDER_WGSL).toContain('let domeTau = max(0.0065, domeChord * bloodInColumn * 0.46 * u.opticalParams.x);');
-    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.035, 0.14, activeCurve * grazingFresnelRim), bloodInColumn), 1.0, darkTop);');
+    expect(RENDER_WGSL).toContain('let plumeGlareDamp = select(mix(1.0, mix(0.055, 0.42, activeCurve * (0.35 + 0.65 * grazingFresnelRim)), bloodInColumn), 1.0, darkTop);');
     expect(RENDER_WGSL).toContain('let tauCell = mix(0.0042, 0.0065, smoothstep(0.10, 0.55, cocBlur));');
     expect(RENDER_WGSL).toContain('orificeCoreBoost = max(orificeCoreBoost, 1.0 + select(0.40, 0.65, topsideCam) * slotOrifice);');
     expect(COMPOSITE_WGSL).toContain('let softboxDome = (');
@@ -1640,5 +1647,32 @@ describe('Boundary & adversarial edge-case invariants', () => {
     const resFrontDome = (camRelYSwell - 0.01868) / -rdYSwell - camRelYSwell / -rdYSwell;
     const resRearTrough = (camRelYSwell + 0.00588) / -rdYSwell - camRelYSwell / -rdYSwell;
     expect(resRearTrough - resFrontDome).toBeGreaterThan(0.08);
+  });
+
+  it('enforces Round 9 turbid whole-blood aerial drop optics, capillary Nyquist grid scaling, single-impulse PDE forcing, and wave-warped Sub-Meniscus TIR', () => {
+    // 1. Turbid whole-blood (Hct ~ 45%, n = 1.378) core blocks glass-marble sky lensing (< 0.05% transmission)
+    expect(COMPOSITE_WGSL).toContain('evalDropStudioWindowSpec');
+    expect(COMPOSITE_WGSL).not.toContain('pow(max(keyAlign, 0.0), 150.0)');
+    expect(COMPOSITE_WGSL).toContain('let ballisticTrans = exp(-chord * 92.0 * u.opticalParams.x * turbidGate);');
+    const coreChord = 0.092;
+    expect(Math.exp(-coreChord * 92.0)).toBeLessThan(0.0005);
+    const thinNeckChord = 0.008;
+    expect(Math.exp(-thinNeckChord * 92.0)).toBeGreaterThan(0.45);
+
+    // 2. Capillary Nyquist grid scaling (WAVE_HALF_EXTENT = 0.70 -> dx = 5.47mm, Nyquist = 10.9mm) + unattenuated [-0.48, +0.48] cuvette
+    expect(WAVE_HALF_EXTENT).toBeCloseTo(0.70, 6);
+    const waveDx = (2.0 * WAVE_HALF_EXTENT) / WAVE_GRID_SIZE;
+    expect(waveDx).toBeLessThan(0.0056);
+    expect(WAVE_HALF_EXTENT * 0.72).toBeGreaterThan(0.48);
+
+    // 3. Single momentum-coupled PDE crater + capillary contact-line impulse (zero synthetic double-piston reboundImpulse)
+    expect(WAVE_SPATIAL_FORCE_WGSL).not.toContain('reboundImpulse');
+    expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let capImpulse =');
+
+    // 4. Wave-warped Sub-Meniscus TIR with folded water-path attenuation & zero origin-locked (0,0) radial vectors
+    expect(RENDER_WGSL).toContain('let rPupil = clamp(0.0032 + 0.0028 / max(rd.y, 0.20), 0.0035, 0.0078);');
+    expect(RENDER_WGSL).toContain('let tirFoldedAtten = exp(-tSurfHit * 0.52) * mix(0.30, 0.46, craterDamp);');
+    expect(RENDER_WGSL).not.toContain('mercuryBand');
+    expect(RENDER_WGSL).not.toContain('slopeContrast');
   });
 });

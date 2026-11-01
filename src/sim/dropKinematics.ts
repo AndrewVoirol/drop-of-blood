@@ -163,12 +163,14 @@ function createEmptySlot(): DropSlotState {
 
 function evalRayleighOscillation(age: number, radius: number, seed: number, boost: number): number {
   const rRatio = Math.pow(INITIAL_DROP_RADIUS / Math.max(radius, 0.020), 1.5);
-  const omega2 = 9.2 * rRatio;
-  const omega3 = 17.8 * rRatio; // l=3 capillary pear harmonic
-  const damp = Math.exp(-age * 0.24);
-  const amp2 = 0.068 + boost;
-  const amp3 = 0.018 + 0.42 * boost;
-  return (amp2 * Math.cos(age * omega2 + seed) + amp3 * Math.sin(age * omega3 + seed * 1.7)) * damp;
+  const omega2 = 9.6 * rRatio;
+  const omega3 = 18.4 * rRatio; // l=3 capillary pear harmonic
+  const damp = Math.exp(-age * 0.36);
+  const amp2 = 0.092 + boost;
+  const amp3 = 0.022 + 0.35 * boost;
+  // Subtle aerodynamic oblate flattening (Weber number ~ v^2) during late free-fall
+  const aeroOblate = -0.020 * smoothstep(0.25, 0.90, age);
+  return (amp2 * Math.cos(age * omega2 + seed) + amp3 * Math.sin(age * omega3 + seed * 1.7)) * damp + aeroOblate;
 }
 
 /**
@@ -275,8 +277,8 @@ export class MultiDropSystem {
     s.initialCoalesceVolume = vol;
     s.ageInPhase = 0.0;
     s.coalesceDuration = clamp(BASE_COALESCE_DURATION * (rClamped / INITIAL_DROP_RADIUS), 0.48, 1.54);
-    s.oscBoost = 0.0;
-    s.oscillation = evalRayleighOscillation(0.0, rClamped, seed, 0.0);
+    s.oscBoost = 0.024;
+    s.oscillation = evalRayleighOscillation(0.0, rClamped, seed, s.oscBoost);
     s.oscAtContact = s.oscillation;
     s.volDrainRate = 0.0;
     s.stepDrainedVolume = 0.0;
@@ -430,9 +432,9 @@ export class MultiDropSystem {
     s.stepDrainedVolume += dVol;
     s.radius = nextVol > 0.0 ? radiusFromVolume(nextVol) : 0.0;
 
-    // Fast (~0.18-0.24s) C0/C1-continuous inertial dome slump directly into the live FFT crater floor,
-    // releasing the cavity so the 256x256 gravity-capillary solver freely rebounds into a central swell.
-    const tauSlump = clamp(0.20 * (s.impactRadius / INITIAL_DROP_RADIUS), 0.14, 0.24);
+    // Crisp (~0.11-0.15s) C0/C1-continuous inertial dome plunge directly into the live FFT crater floor,
+    // eliminating the slow plastic gumdrop sit on the surface while releasing the cavity to rebound naturally.
+    const tauSlump = clamp(0.125 * (s.impactRadius / INITIAL_DROP_RADIUS), 0.09, 0.155);
     const sNorm = Math.min(1.0, s.ageInPhase / tauSlump);
     const slumpSmooth = smoothstep(0.0, 1.0, sNorm);
     const vImpact = Math.min(s.impactVelY, -0.18);
@@ -441,8 +443,8 @@ export class MultiDropSystem {
       WATER_SURFACE_Y +
       s.impactRadius +
       vImpact * Math.min(s.ageInPhase, tauSlump) -
-      1.98 * s.impactRadius * slumpSmooth * slumpSmooth -
-      0.095 * Math.max(0.0, s.ageInPhase - tauSlump);
+      2.22 * s.impactRadius * slumpSmooth * slumpSmooth -
+      0.115 * Math.max(0.0, s.ageInPhase - tauSlump);
 
     s.oscillation =
       (s.oscAtContact * (1.0 - smoothstep(0.0, 0.35, sNorm)) -
