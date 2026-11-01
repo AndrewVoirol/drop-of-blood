@@ -4,8 +4,10 @@
 
 1. **Mandatory Turn-0 Skill Read**: Read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simulation/SKILL.md` before designing, editing, or delegating any shader, fluid, camera, or verification work.
 2. **Core Commands**:
-   - **Unit Tests (`44/44`)**: `npx vitest run`
-   - **Typecheck + Production Bundle**: `npm run build`
+   - **Unit Tests (`44/44`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
+   - **Static WGSL AST, Struct Alignment & Control-Flow Lint**: `npm run lint:wgsl`
+   - **Symbol Line-Number Indexer (Before Reading Monoliths)**: `npm run map:symbols -- <keyword>`
+   - **Typecheck + Production Bundle (`TS 7` + `Vite 8` Rolldown)**: `npm run build`
    - **Real User Preset + DOM Hold + Unpaused Temporal Strip (`~12 s`)**: `node scripts/verify.mjs --preset-matrix` (outputs stitched `.verify-out/preset_matrix_sheet.jpg` and `.verify-out/temporal_entry_strip.jpg`)
    - **Fast 4-Shot Regression + `1:1` Crops (`~10 s`)**: `node scripts/verify.mjs --quick`
    - **Full Regression + `60`-Frame Metal GPU Latency Gate**: `node scripts/verify.mjs`

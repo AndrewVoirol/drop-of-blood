@@ -8,12 +8,20 @@
     "dev": "vite --port 5179 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4179 --strictPort",
+    "lint:wgsl": "node \"$HOME/.gemini/config/skills/gpu-project-modernizer/scripts/lint-wgsl-and-layout.mjs\" .",
+    "map:symbols": "node \"$HOME/.gemini/config/skills/gpu-project-modernizer/scripts/map-symbols.mjs\"",
+    "test:blast": "node \"$HOME/.gemini/config/skills/gpu-project-modernizer/scripts/test-blast.mjs\"",
+    "verify:gpu": "node scripts/verify.mjs --quick",
     "test": "vitest run"
   },
   "devDependencies": {
-    "@webgpu/types": "^0.1.64",
-    "typescript": "^5.8.2",
-    "vite": "^6.2.0",
-    "vitest": "^3.0.8"
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "volta": {
+    "node": "24.21.0",
+    "npm": "11.19.0"
   }
 }
