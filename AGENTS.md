@@ -51,6 +51,8 @@ Every visual change MUST be verified through these actual user presets, never so
 - **Two-Stage Optical Pipeline ([`src/shaders/render.ts`](src/shaders/render.ts))**:
   - Half-res volumetric pass (`1088 × 680` `volTex`: `.rgb` linear radiance, `.a` ray hit distance `tSurf`).
   - `1:1` Retina `COMPOSITE_WGSL` (`2560 × 1600`): perspective-detrended `volTex.a - tFlat` bilateral upsampling + native `1:1` foreground aerial/pendant drop intersection + meniscus speculars.
+  - **Apple Silicon XDR / EDR Swapchain (`override HDR_EXTENDED`)**: Pre-compiles `pCompositeSdr` (`bgra8unorm`, IEC `linearToSRGB`) and `pCompositeHdr` (`rgba16float`, `toneMapping: { mode: 'extended' }`, linear extended-sRGB matching SDR 1:1 across `[0, 0.76]` with specular headroom `> 1.0` above `0.76`), switched dynamically via `window.matchMedia('(dynamic-range: high)')` or `engine.setExtendedHdr(boolean)`.
+  - **Hardware `timestamp-query` 5-Pass Telemetry**: When `adapter.features.has('timestamp-query')`, `BloodDropEngine` resolves per-pass GPU durations into `engine.gpuPassTimingsMs` (`macAndWaveMs`, `parcelAndConcMs`, `lightingAndBricksMs`, `halfResVolumetricMs`, `retinaCompositeMs`, `totalGpuMs`) via double-buffered 80-byte readback (`engine.getWorkbenchAdapter()`).
 - **Hard Regression Invariants Across All 4 Optical Regimes** (`Bright-Field Topside`, `Dark-Field Topside`, `Sub-Meniscus TIR`, `Steep Snell's Window`):
   - Unbroken vertical stem continuity (`emptyGapScanlines === 0`).
   - Oblate toroidal vortex ring bottom (`centerSpearExcessPx <= 14`, zero pointed axial V-tip spear).

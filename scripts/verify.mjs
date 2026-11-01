@@ -347,6 +347,9 @@ async function main() {
       window.__INIT_INFO__ = {
         canvasWidth: eng.canvas.width,
         canvasHeight: eng.canvas.height,
+        format: eng.format,
+        isExtendedHdr: eng.isExtendedHdr,
+        supportsTimestamps: eng.supportsTimestamps,
         autoLoop: eng.autoLoop,
         validationErrors: [...eng.validationErrors],
         adapterInfo: {
@@ -358,10 +361,13 @@ async function main() {
       };
 
       const w = eng.canvas.width, h = eng.canvas.height;
-      const bytesPerRow = Math.ceil((w * 4) / 256) * 256;
+      const pixFormat = eng.format;
+      const isFloat16Swap = pixFormat === 'rgba16float';
+      const bpp = isFloat16Swap ? 8 : 4;
+      const bytesPerRow = Math.ceil((w * bpp) / 256) * 256;
       const pixTex = eng.device.createTexture({
         size: [w, h, 1],
-        format: eng.format,
+        format: pixFormat,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       });
       const pixBuf = eng.device.createBuffer({
@@ -535,9 +541,18 @@ async function main() {
             });
           });
           await pixBuf.mapAsync(GPUMapMode.READ);
-          const raw = new Uint8Array(pixBuf.getMappedRange());
-          const isBGRA = eng.format.startsWith('bgra');
+          const mappedRange = pixBuf.getMappedRange();
+          const raw = isFloat16Swap ? null : new Uint8Array(mappedRange);
+          const rawF16 = isFloat16Swap ? new Float16Array(mappedRange) : null;
+          const f16RowStride = bytesPerRow >> 1;
+          const isBGRA = pixFormat.startsWith('bgra');
+          const linToSrgbByte = (v) => {
+            const c = v <= 0 ? 0 : v >= 1 ? 1 : v;
+            const s = c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+            return Math.round(s * 255);
+          };
 
+          let maxHdrLinearPeak = 0;
           let whiteEyeballCutoutPx = 0;
           let muddyYellowTanSmokePx = 0;
           let magentaWaterRipplePx = 0;
@@ -559,12 +574,26 @@ async function main() {
 
           for (let y = 0; y < h; y++) {
             const row = y * bytesPerRow;
+            const rowF16 = y * f16RowStride;
             let rowBlood = 0;
             for (let x = 0; x < w; x++) {
-              const i = row + x * 4;
-              const r = isBGRA ? raw[i + 2] : raw[i + 0];
-              const g = raw[i + 1];
-              const b = isBGRA ? raw[i + 0] : raw[i + 2];
+              let r, g, b;
+              if (rawF16) {
+                const j = rowF16 + x * 4;
+                const lr = rawF16[j];
+                const lg = rawF16[j + 1];
+                const lb = rawF16[j + 2];
+                const pk = Math.max(lr, lg, lb);
+                if (pk > maxHdrLinearPeak) maxHdrLinearPeak = pk;
+                r = linToSrgbByte(lr);
+                g = linToSrgbByte(lg);
+                b = linToSrgbByte(lb);
+              } else {
+                const i = row + x * 4;
+                r = isBGRA ? raw[i + 2] : raw[i + 0];
+                g = raw[i + 1];
+                b = isBGRA ? raw[i + 0] : raw[i + 2];
+              }
 
               if (isShallowUnderwater && y > h * 0.04 && y < h * 0.42 && x > w * 0.20 && x < w * 0.80) {
                 if (r > 218 && g > 224 && b > 230) whiteEyeballCutoutPx++;
@@ -653,12 +682,74 @@ async function main() {
           return {
             width: w,
             height: h,
+            maxHdrLinearPeak: isFloat16Swap ? +maxHdrLinearPeak.toFixed(4) : null,
             whiteEyeballCutoutPx,
             muddyYellowTanSmokePx,
             magentaWaterRipplePx,
             upperToLowerBloodRatio: lowerHalfBloodPx > 0 ? +(upperHalfBloodPx / lowerHalfBloodPx).toFixed(3) : 0,
             stemContinuity,
             bottomOblateness,
+          };
+        },
+
+        async verifyExtendedHdrToggle() {
+          const wasHdr = eng.isExtendedHdr;
+          eng.setExtendedHdr(true);
+          if (!eng.isExtendedHdr || eng.format !== 'rgba16float') {
+            eng.setExtendedHdr(wasHdr);
+            return { supported: false, maxHdrLinearPeak: 0, hdrSuperWhitePx: 0 };
+          }
+          const hdrBytesPerRow = Math.ceil((w * 8) / 256) * 256;
+          const hdrTex = eng.device.createTexture({
+            size: [w, h, 1],
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+          });
+          const hdrBuf = eng.device.createBuffer({
+            size: hdrBytesPerRow * h,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+          await new Promise((resolve) => {
+            requestAnimationFrame(() => {
+              eng.uploadSnapshotUniforms(0.0, eng.spawnCursor, 0);
+              const enc = eng.device.createCommandEncoder();
+              const swapView = eng.context.getCurrentTexture().createView();
+              eng.encodeOpticalRenderPasses(enc, swapView);
+              eng.encodeOpticalRenderPasses(enc, hdrTex.createView());
+              enc.copyTextureToBuffer(
+                { texture: hdrTex },
+                { buffer: hdrBuf, bytesPerRow: hdrBytesPerRow, rowsPerImage: h },
+                [w, h, 1]
+              );
+              eng.device.queue.submit([enc.finish()]);
+              resolve();
+            });
+          });
+          await hdrBuf.mapAsync(GPUMapMode.READ);
+          const f16 = new Float16Array(hdrBuf.getMappedRange());
+          const stride = hdrBytesPerRow >> 1;
+          let maxPeak = 0;
+          let hdrSuperWhitePx = 0;
+          for (let y = 0; y < h; y++) {
+            const row = y * stride;
+            for (let x = 0; x < w; x++) {
+              const j = row + x * 4;
+              const pk = Math.max(f16[j], f16[j + 1], f16[j + 2]);
+              if (pk > maxPeak) maxPeak = pk;
+              if (pk > 1.001) hdrSuperWhitePx++;
+            }
+          }
+          hdrBuf.unmap();
+          hdrTex.destroy();
+          hdrBuf.destroy();
+          eng.setExtendedHdr(wasHdr);
+          await eng.device.queue.onSubmittedWorkDone();
+          return {
+            supported: true,
+            maxHdrLinearPeak: +maxPeak.toFixed(4),
+            hdrSuperWhitePx,
+            restoredFormat: eng.format,
+            validationErrors: eng.validationErrors.length,
           };
         },
 
@@ -677,6 +768,7 @@ async function main() {
             gpuTimes.push(performance.now() - t0);
           }
           eng.paused = true;
+          await new Promise((r) => setTimeout(r, 20));
           const sorted = [...gpuTimes].sort((a, b) => a - b);
           const avg = gpuTimes.reduce((a, b) => a + b, 0) / gpuTimes.length;
           return {
@@ -684,6 +776,7 @@ async function main() {
             avgGpuMs: +avg.toFixed(2),
             p95GpuMs: +sorted[Math.floor(sorted.length * 0.95)].toFixed(2),
             maxGpuMs: +sorted[sorted.length - 1].toFixed(2),
+            gpuPassTimingsMs: { ...eng.gpuPassTimingsMs },
           };
         }
       };
@@ -723,6 +816,8 @@ async function main() {
       window.__QA__.setCam(0.0, 0.34, 1.04, [0.0, 0.24, 0.0]);
     })()`);
     await snap('s2_06_central_rebound_swell.png');
+    const hdrExtendedCheck = await cdp.eval('window.__QA__.verifyExtendedHdrToggle()');
+    console.log('XDR rgba16float extended swapchain check:', JSON.stringify(hdrExtendedCheck));
 
     await cdp.eval(`(async () => {
       const eng = window.__BLOOD_ENGINE__;
@@ -817,17 +912,20 @@ async function main() {
         gateFailures.push(`${f} bottomOblateness failed: ${JSON.stringify(byFile[f]?.bottomOblateness)}`);
       }
     }
+    if (!hdrExtendedCheck?.supported || hdrExtendedCheck.maxHdrLinearPeak <= 1.0) {
+      gateFailures.push(`XDR rgba16float extended check failed: ${JSON.stringify(hdrExtendedCheck)}`);
+    }
     for (const prof of profiles) {
       if (prof.avgGpuMs > 12.5 || prof.p95GpuMs > 15.5) {
         gateFailures.push(`GPU 60Hz budget exceeded on ${prof.label}: ${JSON.stringify(prof)}`);
       }
     }
 
-    writeOut('verification_metrics.json', JSON.stringify({ initInfo, profiles, gateFailures, captures }, null, 2));
+    writeOut('verification_metrics.json', JSON.stringify({ initInfo, hdrExtendedCheck, profiles, gateFailures, captures }, null, 2));
     if (gateFailures.length > 0) {
       throw new Error('Automated Verification Gate Failures:\n' + gateFailures.join('\n'));
     }
-    console.log('VERIFICATION PASSED', JSON.stringify({ quick: QUICK, profiles }, null, 2));
+    console.log('VERIFICATION PASSED', JSON.stringify({ quick: QUICK, hdrExtendedCheck, profiles }, null, 2));
     ws.close();
   } finally {
     if (chrome.exitCode === null) {

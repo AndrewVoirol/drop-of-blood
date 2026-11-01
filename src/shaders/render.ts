@@ -2536,6 +2536,7 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
 `;
 
 export const COMPOSITE_WGSL = /* wgsl */ `
+override HDR_EXTENDED: u32 = 0u;
 ${COMMON_WGSL}
 
 @group(0) @binding(0) var<uniform> u: SimUniforms;
@@ -3110,6 +3111,16 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
   finalLinear = finalLinear * lensVignette;
 
   let mapped = pbrNeutralToneMap(finalLinear);
+  if (HDR_EXTENDED != 0u) {
+    // Preserve exact pbrNeutral IEC linear sRGB across [0, 0.76] while opening linear
+    // extended-sRGB XDR headroom (> 1.0..4.0x) on studio strip glints and meniscus speculars
+    let excess = max(finalLinear - vec3<f32>(0.76), vec3<f32>(0.0));
+    let excessPeak = max(excess.r, max(excess.g, excess.b));
+    let maxHeadroom = 3.0;
+    let boostPeak = (excessPeak * maxHeadroom) / (excessPeak + maxHeadroom * 1.30 + 1e-4);
+    let edrBoost = select(vec3<f32>(0.0), excess * (boostPeak / max(excessPeak, 1e-4)), excessPeak > 1e-4);
+    return vec4<f32>(mapped + edrBoost, 1.0);
+  }
   let srgb = linearToSRGB(mapped);
 
   // Sub-LSB (1/512) Interleaved Gradient Noise dither prevents 8-bit Mach banding in deep obsidian gradients

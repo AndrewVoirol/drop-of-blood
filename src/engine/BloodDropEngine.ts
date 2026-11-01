@@ -96,11 +96,33 @@ const MG_L3_X = VEL_GRID_X / 8; // 12
 const MG_L3_Y = VEL_GRID_Y / 8; // 16
 const MG_L3_Z = VEL_GRID_Z / 8; // 12
 
+export interface GpuPassTimingsMs {
+  macAndWaveMs: number;
+  parcelAndConcMs: number;
+  lightingAndBricksMs: number;
+  halfResVolumetricMs: number;
+  retinaCompositeMs: number;
+  totalGpuMs: number;
+  sampleCount: number;
+}
+
 export class BloodDropEngine {
   public readonly canvas: HTMLCanvasElement;
   public readonly device: GPUDevice;
   public readonly context: GPUCanvasContext;
-  public readonly format: GPUTextureFormat;
+  public format: GPUTextureFormat;
+  public readonly preferredSdrFormat: GPUTextureFormat;
+  public readonly supportsTimestamps: boolean;
+  public isExtendedHdr = false;
+  public readonly gpuPassTimingsMs: GpuPassTimingsMs = {
+    macAndWaveMs: 0,
+    parcelAndConcMs: 0,
+    lightingAndBricksMs: 0,
+    halfResVolumetricMs: 0,
+    retinaCompositeMs: 0,
+    totalGpuMs: 0,
+    sampleCount: 0,
+  };
   public readonly camera = new OrbitCamera(CAMERA_PRESETS.hero);
   public readonly config: FluidOpticalConfig = { ...DEFAULT_FLUID_OPTICAL_CONFIG };
   public readonly multiDrops = new MultiDropSystem();
@@ -215,7 +237,22 @@ export class BloodDropEngine {
   private readonly pBrickDilate: GPUComputePipeline;
   private readonly bglComposite: GPUBindGroupLayout;
   private readonly pRender: GPURenderPipeline;
-  private readonly pComposite: GPURenderPipeline;
+  private readonly pCompositeSdr: GPURenderPipeline;
+  private readonly pCompositeHdr: GPURenderPipeline;
+  private pComposite: GPURenderPipeline;
+
+  private readonly tsQuerySet: GPUQuerySet | null = null;
+  private readonly tsResolveBuffer: GPUBuffer | null = null;
+  private readonly tsReadBuffers: [GPUBuffer, GPUBuffer] | null = null;
+  private readonly tsReadInFlight: [boolean, boolean] = [false, false];
+  private tsRingCursor: 0 | 1 = 0;
+  private readonly tsPass0: GPUComputePassTimestampWrites | undefined;
+  private readonly tsPass1: GPUComputePassTimestampWrites | undefined;
+  private readonly tsPass2: GPUComputePassTimestampWrites | undefined;
+  private readonly tsPass3: GPURenderPassTimestampWrites | undefined;
+  private readonly tsPass4: GPURenderPassTimestampWrites | undefined;
+  private hdrMediaQuery: MediaQueryList | null = null;
+  private onHdrMediaChange: ((e: MediaQueryListEvent) => void) | null = null;
 
   // Pre-allocated BindGroup permutations (Zero-allocation render loop invariant)
   private readonly bgWaveClear: [GPUBindGroup, GPUBindGroup];
@@ -294,22 +331,66 @@ export class BloodDropEngine {
     if (!adapter) {
       throw new Error('Unable to acquire a high-performance WebGPU adapter.');
     }
-    const device = await adapter.requestDevice();
+    const supportsTimestamps = adapter.features.has('timestamp-query');
+    const device = await adapter.requestDevice(
+      supportsTimestamps ? { requiredFeatures: ['timestamp-query'] } : undefined
+    );
     const context = canvas.getContext('webgpu');
     if (!context) {
       throw new Error('Unable to acquire a WebGPU canvas context.');
     }
-    const format = navigator.gpu.getPreferredCanvasFormat();
-    context.configure({
-      device,
-      format,
-      alphaMode: 'opaque',
-    });
+    const preferredSdrFormat = navigator.gpu.getPreferredCanvasFormat();
+    const hdrQuery =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(dynamic-range: high)')
+        : null;
+
+    let format: GPUTextureFormat = preferredSdrFormat;
+    let isExtendedHdr = false;
+    if (hdrQuery?.matches) {
+      try {
+        context.configure({
+          device,
+          format: 'rgba16float',
+          alphaMode: 'opaque',
+          toneMapping: { mode: 'extended' },
+        });
+        format = 'rgba16float';
+        isExtendedHdr = true;
+      } catch {
+        isExtendedHdr = false;
+      }
+    }
+    if (!isExtendedHdr) {
+      try {
+        context.configure({
+          device,
+          format: preferredSdrFormat,
+          alphaMode: 'opaque',
+          toneMapping: { mode: 'standard' },
+        });
+      } catch {
+        context.configure({
+          device,
+          format: preferredSdrFormat,
+          alphaMode: 'opaque',
+        });
+      }
+    }
 
     device.pushErrorScope('validation');
     device.pushErrorScope('internal');
 
-    const engine = new BloodDropEngine(canvas, device, context, format);
+    const engine = new BloodDropEngine(
+      canvas,
+      device,
+      context,
+      format,
+      preferredSdrFormat,
+      isExtendedHdr,
+      supportsTimestamps,
+      hdrQuery
+    );
     await engine.verifyCleanInit();
     engine.resetSimulation(1.0);
     engine.dispatchLightingOnly();
@@ -321,12 +402,59 @@ export class BloodDropEngine {
     canvas: HTMLCanvasElement,
     device: GPUDevice,
     context: GPUCanvasContext,
-    format: GPUTextureFormat
+    format: GPUTextureFormat,
+    preferredSdrFormat: GPUTextureFormat,
+    isExtendedHdr: boolean,
+    supportsTimestamps: boolean,
+    hdrQuery: MediaQueryList | null
   ) {
     this.canvas = canvas;
     this.device = device;
     this.context = context;
     this.format = format;
+    this.preferredSdrFormat = preferredSdrFormat;
+    this.isExtendedHdr = isExtendedHdr;
+    this.supportsTimestamps = supportsTimestamps;
+
+    if (supportsTimestamps) {
+      this.tsQuerySet = device.createQuerySet({
+        label: 'BloodDropPassTimestamps',
+        type: 'timestamp',
+        count: 10,
+      });
+      this.tsResolveBuffer = device.createBuffer({
+        label: 'BloodDropTimestampResolve',
+        size: 80,
+        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+      });
+      this.tsReadBuffers = [
+        device.createBuffer({
+          label: 'BloodDropTimestampRead0',
+          size: 80,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+        device.createBuffer({
+          label: 'BloodDropTimestampRead1',
+          size: 80,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+      ];
+      this.tsPass0 = { querySet: this.tsQuerySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
+      this.tsPass1 = { querySet: this.tsQuerySet, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3 };
+      this.tsPass2 = { querySet: this.tsQuerySet, beginningOfPassWriteIndex: 4, endOfPassWriteIndex: 5 };
+      this.tsPass3 = { querySet: this.tsQuerySet, beginningOfPassWriteIndex: 6, endOfPassWriteIndex: 7 };
+      this.tsPass4 = { querySet: this.tsQuerySet, beginningOfPassWriteIndex: 8, endOfPassWriteIndex: 9 };
+    }
+
+    if (hdrQuery) {
+      this.hdrMediaQuery = hdrQuery;
+      this.onHdrMediaChange = (e: MediaQueryListEvent) => {
+        if (!this.destroyed) {
+          this.setExtendedHdr(e.matches);
+        }
+      };
+      hdrQuery.addEventListener('change', this.onHdrMediaChange);
+    }
 
     this.device.addEventListener('uncapturederror', (ev) => {
       const msg = ev.error?.message ?? String(ev.error);
@@ -803,17 +931,32 @@ export class BloodDropEngine {
 
     const compMod = device.createShaderModule({ label: 'CompositeShader', code: COMPOSITE_WGSL });
     this.inspectCompilation('CompositeShader', compMod);
-    this.pComposite = device.createRenderPipeline({
-      label: 'CompositePipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.bglComposite] }),
+    const compLayout = device.createPipelineLayout({ bindGroupLayouts: [this.bglComposite] });
+    this.pCompositeSdr = device.createRenderPipeline({
+      label: 'CompositePipelineSDR',
+      layout: compLayout,
       vertex: { module: compMod, entryPoint: 'vsMain' },
       fragment: {
         module: compMod,
         entryPoint: 'fsMain',
-        targets: [{ format }],
+        constants: { HDR_EXTENDED: 0 },
+        targets: [{ format: preferredSdrFormat }],
       },
       primitive: { topology: 'triangle-list' },
     });
+    this.pCompositeHdr = device.createRenderPipeline({
+      label: 'CompositePipelineHDR',
+      layout: compLayout,
+      vertex: { module: compMod, entryPoint: 'vsMain' },
+      fragment: {
+        module: compMod,
+        entryPoint: 'fsMain',
+        constants: { HDR_EXTENDED: 1 },
+        targets: [{ format: 'rgba16float' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.pComposite = isExtendedHdr ? this.pCompositeHdr : this.pCompositeSdr;
 
     // Views & Pre-Allocated BindGroup Matrices
     const uBuf = { buffer: this.uniformBuffer };
@@ -1313,6 +1456,77 @@ export class BloodDropEngine {
     this.config.lightingMode = darkChiaroscuro ? 1.0 : 0.0;
   }
 
+  /**
+   * Switches the canvas swapchain between Apple Silicon XDR linear extended-sRGB (`rgba16float` +
+   * `toneMapping: { mode: 'extended' }`) and standard SDR (`bgra8unorm`/`rgba8unorm`) with zero
+   * shader recompilation via pre-specialized `HDR_EXTENDED` composite pipelines.
+   */
+  public setExtendedHdr(enabled: boolean): void {
+    if (this.destroyed || this.isDeviceLost) return;
+    if (enabled === this.isExtendedHdr) return;
+    if (enabled) {
+      try {
+        this.context.configure({
+          device: this.device,
+          format: 'rgba16float',
+          alphaMode: 'opaque',
+          toneMapping: { mode: 'extended' },
+        });
+        this.format = 'rgba16float';
+        this.isExtendedHdr = true;
+        this.pComposite = this.pCompositeHdr;
+        return;
+      } catch {
+        // Fallback to standard SDR swapchain if extended HDR is rejected
+      }
+    }
+    try {
+      this.context.configure({
+        device: this.device,
+        format: this.preferredSdrFormat,
+        alphaMode: 'opaque',
+        toneMapping: { mode: 'standard' },
+      });
+    } catch {
+      this.context.configure({
+        device: this.device,
+        format: this.preferredSdrFormat,
+        alphaMode: 'opaque',
+      });
+    }
+    this.format = this.preferredSdrFormat;
+    this.isExtendedHdr = false;
+    this.pComposite = this.pCompositeSdr;
+  }
+
+  /**
+   * Compact telemetry and deterministic control surface for QA / Workbench tooling.
+   */
+  public getWorkbenchAdapter() {
+    return {
+      getStatus: () => ({
+        simTime: this.simTime,
+        frameIndex: this.frameIndex,
+        paused: this.paused,
+        timeScale: this.timeScale,
+        format: this.format,
+        isExtendedHdr: this.isExtendedHdr,
+        supportsTimestamps: this.supportsTimestamps,
+        canvasSize: [this.canvas.width, this.canvas.height] as [number, number],
+        gpuPassTimingsMs: { ...this.gpuPassTimingsMs },
+        validationErrorCount: this.validationErrors.length,
+      }),
+      getPresets: () => ['hero', 'crown', 'abyss'] as const,
+      applyPreset: (id: CameraPreset['id'], instant = true) => this.setCameraPreset(id, instant),
+      setPaused: (paused: boolean) => {
+        this.paused = paused;
+      },
+      seekSimTime: (t: number, seed = 1.0) => this.seekToSimTime(t, seed),
+      setExtendedHdr: (enabled: boolean) => this.setExtendedHdr(enabled),
+      getGpuPassTimings: () => ({ ...this.gpuPassTimingsMs }),
+    };
+  }
+
   private nextSeed(): number {
     this.dropSeed = ((this.dropSeed * 2.7182818 + 1.37) % 100.0) + 0.5;
     return this.dropSeed;
@@ -1550,8 +1764,15 @@ export class BloodDropEngine {
     }
   }
 
-  private encodePhysicsStep(enc: GPUCommandEncoder, substepSpawnCount: number): void {
-    const passA = enc.beginComputePass({ label: 'PhysicsSubstepPreSplat' });
+  private encodePhysicsStep(
+    enc: GPUCommandEncoder,
+    substepSpawnCount: number,
+    recordTimestamps = false
+  ): void {
+    const passA = enc.beginComputePass({
+      label: 'PhysicsSubstepPreSplat',
+      timestampWrites: recordTimestamps ? this.tsPass0 : undefined,
+    });
 
     const wgWave = WAVE_GRID_SIZE / 8; // 32
     const wgVelX = VEL_GRID_X / 8;     // 12
@@ -1765,7 +1986,10 @@ export class BloodDropEngine {
     enc.clearBuffer(this.splatIntactBuffer);
     enc.clearBuffer(this.splatLysedBuffer);
 
-    const passB = enc.beginComputePass({ label: 'PhysicsSubstepTransport' });
+    const passB = enc.beginComputePass({
+      label: 'PhysicsSubstepTransport',
+      timestampWrites: recordTimestamps ? this.tsPass1 : undefined,
+    });
 
     // Emit newly drained Lagrangian RBC parcels across all active wetting necks (transferring any wrapped parcel mass into splatLysed)
     if (substepSpawnCount > 0) {
@@ -1863,11 +2087,16 @@ export class BloodDropEngine {
     await this.device.queue.onSubmittedWorkDone();
   }
 
-  private encodeOpticalRenderPasses(enc: GPUCommandEncoder, swapView: GPUTextureView): void {
+  private encodeOpticalRenderPasses(
+    enc: GPUCommandEncoder,
+    swapView: GPUTextureView,
+    recordTimestamps = false
+  ): void {
     this.ensureVolRenderTarget();
 
     const volPass = enc.beginRenderPass({
       label: 'VolumetricHDRPass',
+      timestampWrites: recordTimestamps ? this.tsPass3 : undefined,
       colorAttachments: [
         {
           view: this.viewVolRender,
@@ -1884,6 +2113,7 @@ export class BloodDropEngine {
 
     const compPass = enc.beginRenderPass({
       label: 'CompositeToneMapPass',
+      timestampWrites: recordTimestamps ? this.tsPass4 : undefined,
       colorAttachments: [
         {
           view: swapView,
@@ -1897,6 +2127,64 @@ export class BloodDropEngine {
     compPass.setBindGroup(0, this.bgComposite[this.waveState]);
     compPass.draw(3, 1, 0, 0);
     compPass.end();
+  }
+
+  private resolvePassTimestamps(enc: GPUCommandEncoder, hasPhysicsPasses: boolean): number {
+    if (!this.supportsTimestamps || !this.tsQuerySet || !this.tsResolveBuffer || !this.tsReadBuffers) {
+      return -1;
+    }
+    const slot = this.tsRingCursor;
+    if (this.tsReadInFlight[slot]) {
+      return -1;
+    }
+    if (hasPhysicsPasses) {
+      enc.resolveQuerySet(this.tsQuerySet, 0, 10, this.tsResolveBuffer, 0);
+    } else {
+      // W3C WebGPU requires resolveQuerySet destinationOffset to be 256-byte aligned (0 here)
+      enc.resolveQuerySet(this.tsQuerySet, 4, 6, this.tsResolveBuffer, 0);
+    }
+    enc.copyBufferToBuffer(this.tsResolveBuffer, 0, this.tsReadBuffers[slot], 0, 80);
+    this.tsRingCursor = (1 - slot) as 0 | 1;
+    return slot;
+  }
+
+  private collectPassTimestamps(slot: 0 | 1, hasPhysicsPasses: boolean): void {
+    if (!this.tsReadBuffers || this.destroyed || this.isDeviceLost) return;
+    const readBuf = this.tsReadBuffers[slot];
+    this.tsReadInFlight[slot] = true;
+    void readBuf
+      .mapAsync(GPUMapMode.READ)
+      .then(() => {
+        if (this.destroyed || this.isDeviceLost) return;
+        const ns = new BigInt64Array(readBuf.getMappedRange());
+        const deltaMs = (i0: number, i1: number): number => {
+          const dt = Number(ns[i1] - ns[i0]) * 1e-6;
+          return dt >= 0 && Number.isFinite(dt) ? dt : 0;
+        };
+        const base = hasPhysicsPasses ? 0 : -4;
+        const macMs = hasPhysicsPasses ? deltaMs(0, 1) : 0;
+        const parcelMs = hasPhysicsPasses ? deltaMs(2, 3) : 0;
+        const lightMs = deltaMs(4 + base, 5 + base);
+        const volMs = deltaMs(6 + base, 7 + base);
+        const compMs = deltaMs(8 + base, 9 + base);
+        // Measure true end-to-end GPU span (ns[last] - ns[0]) rather than summing overlapped Apple Silicon TBDR stages
+        const totalSpanMs = deltaMs(0, 9 + base);
+        readBuf.unmap();
+
+        this.gpuPassTimingsMs.macAndWaveMs = +macMs.toFixed(3);
+        this.gpuPassTimingsMs.parcelAndConcMs = +parcelMs.toFixed(3);
+        this.gpuPassTimingsMs.lightingAndBricksMs = +lightMs.toFixed(3);
+        this.gpuPassTimingsMs.halfResVolumetricMs = +volMs.toFixed(3);
+        this.gpuPassTimingsMs.retinaCompositeMs = +compMs.toFixed(3);
+        this.gpuPassTimingsMs.totalGpuMs = +totalSpanMs.toFixed(3);
+        this.gpuPassTimingsMs.sampleCount++;
+      })
+      .catch(() => {
+        // Ignore aborted mapAsync on engine teardown
+      })
+      .finally(() => {
+        this.tsReadInFlight[slot] = false;
+      });
   }
 
   public renderCurrentFrameOnly(): void {
@@ -1963,13 +2251,20 @@ export class BloodDropEngine {
       this.frameIndex++;
       const kin = this.uploadSnapshotUniforms(0.0, this.spawnCursor, 0);
       const enc = this.device.createCommandEncoder({ label: 'PausedFrameEncoder' });
-      const lPass = enc.beginComputePass({ label: 'PausedLightingPass' });
+      const lPass = enc.beginComputePass({
+        label: 'PausedLightingPass',
+        timestampWrites: this.tsPass2,
+      });
       this.encodeLightingPasses(lPass);
       lPass.end();
 
-      this.encodeOpticalRenderPasses(enc, swapView);
+      this.encodeOpticalRenderPasses(enc, swapView, true);
+      const tsSlot = this.resolvePassTimestamps(enc, false);
 
       this.device.queue.submit([enc.finish()]);
+      if (tsSlot >= 0) {
+        this.collectPassTimestamps(tsSlot as 0 | 1, false);
+      }
       return kin;
     }
 
@@ -1979,15 +2274,22 @@ export class BloodDropEngine {
       this.device.queue.writeBuffer(this.uniformBuffer, 0, packed.buffer, 0, SIM_UNIFORM_BYTES);
 
       const enc = this.device.createCommandEncoder({ label: 'SimFrameEncoder' });
-      this.encodePhysicsStep(enc, spawnCount);
+      this.encodePhysicsStep(enc, spawnCount, true);
 
-      const lPass = enc.beginComputePass({ label: 'LightingPass' });
+      const lPass = enc.beginComputePass({
+        label: 'LightingPass',
+        timestampWrites: this.tsPass2,
+      });
       this.encodeLightingPasses(lPass);
       lPass.end();
 
-      this.encodeOpticalRenderPasses(enc, swapView);
+      this.encodeOpticalRenderPasses(enc, swapView, true);
+      const tsSlot = this.resolvePassTimestamps(enc, true);
 
       this.device.queue.submit([enc.finish()]);
+      if (tsSlot >= 0) {
+        this.collectPassTimestamps(tsSlot as 0 | 1, true);
+      }
       return drops;
     }
 
@@ -2018,26 +2320,44 @@ export class BloodDropEngine {
         0,
         SIM_UNIFORM_BYTES
       );
-      this.encodePhysicsStep(enc, this.substepSpawnCounts[s]);
+      this.encodePhysicsStep(enc, this.substepSpawnCounts[s], s === substeps - 1);
     }
 
-    const lPass = enc.beginComputePass({ label: 'LightingPass' });
+    const lPass = enc.beginComputePass({
+      label: 'LightingPass',
+      timestampWrites: this.tsPass2,
+    });
     this.encodeLightingPasses(lPass);
     lPass.end();
 
-    this.encodeOpticalRenderPasses(enc, swapView);
+    this.encodeOpticalRenderPasses(enc, swapView, true);
+    const tsSlot = this.resolvePassTimestamps(enc, true);
 
     this.device.queue.submit([enc.finish()]);
+    if (tsSlot >= 0) {
+      this.collectPassTimestamps(tsSlot as 0 | 1, true);
+    }
     return latestKin;
   }
 
   public destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    if (this.hdrMediaQuery && this.onHdrMediaChange) {
+      this.hdrMediaQuery.removeEventListener('change', this.onHdrMediaChange);
+      this.hdrMediaQuery = null;
+      this.onHdrMediaChange = null;
+    }
     try {
       this.context.unconfigure();
     } catch {
       // Ignore if context already detached
+    }
+    this.tsQuerySet?.destroy();
+    this.tsResolveBuffer?.destroy();
+    if (this.tsReadBuffers) {
+      this.tsReadBuffers[0].destroy();
+      this.tsReadBuffers[1].destroy();
     }
     this.uniformBuffer.destroy();
     this.uniformStagingBuffer.destroy();
