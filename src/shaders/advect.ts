@@ -174,7 +174,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   var lapIntact = 0.0;
-  if (rawIntact > 0u) {
+  let loadNeighborhood = rawIntact > 0u || gPred > 8.0e-5 || lapNeighborsG > 8.0e-5;
+  if (loadNeighborhood) {
     lapIntact = (
       loadIntactRaw(ix + 1, iy, iz) +
       loadIntactRaw(ix - 1, iy, iz) +
@@ -220,21 +221,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let maxG = max(max(max(s000, s100), max(s010, s110)), max(max(s001, s101), max(s011, s111)));
   var cLysed = clamp(gCorr, minG, maxG);
 
-  // Co-moving molecular diffusion + ambient dilution so suspended free hemoglobin clears cleanly over 20-30s
-  let diffBlend = clamp(dt * 3.10, 0.0, 0.056);
+  // Co-moving molecular diffusion + ambient dilution so suspended free hemoglobin forms a soft dispersing cloud around tendrils
+  let diffBlend = clamp(dt * 4.80, 0.0, 0.088);
   cLysed = mix(cLysed, lapNeighborsG, diffBlend);
-  let upperDilute = exp(-dt * mix(0.22, 0.44, smoothstep(yMin + 0.045, yMin + 0.26, p.y)));
+  let upperDilute = exp(-dt * mix(0.11, 0.22, smoothstep(yMin + 0.045, yMin + 0.26, p.y)));
   cLysed = cLysed * upperDilute;
 
   let dmTransfer = f32(rawLysed) * ${(1.0 / SPLAT_FP_SCALE).toExponential(8)};
-  let floorBedCapture = 1.0 - smoothstep(yMin + 0.018, yMin + 0.062, p.y);
-  cLysed = cLysed + dmTransfer * (1.0 - floorBedCapture);
+  let floorBedCapture = 1.0 - smoothstep(yMin + 0.018, yMin + 0.058, p.y);
+  cLysed = cLysed + dmTransfer * (1.0 - floorBedCapture * 0.72);
   if (cLysed < 2.5e-6) {
     cLysed = 0.0;
   }
 
-  // 2. Persistent Eulerian floor rouleaux coagulum pool (.a): captures settled & ring-wrapped floor RBCs
-  //    into a thin, smooth crimson sediment film resting flush on the y = -0.98 borosilicate glass floor!
+  // 2. Softly spreading & gradually dissipating circular bottom pool (.a):
+  //    Spreads radially across the bottom boundary layer and slowly dissolves into the surrounding water
+  //    so settled blood never accumulates into a hard-edged square/diamond floor tile!
+  let rHoriz = length(p.xz);
   var cRouleauxBed = 0.0;
   if (inFloorZone) {
     let bCenter = loadOrigBed(vec3<i32>(ix, iy, iz));
@@ -246,26 +249,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let bAbove = loadOrigBed(vec3<i32>(ix, iy + 1, iz));
     let bBelow = loadOrigBed(vec3<i32>(ix, max(0, iy - 1), iz));
-    let spreadAlpha = clamp(dt * (2.40 + 5.50 * min(bCenter, 0.65)), 0.0, 0.140);
-    let vertDiffuse = clamp(dt * 0.65, 0.0, 0.022);
+    let spreadAlpha = clamp(dt * (3.20 + 6.50 * min(bCenter, 0.65)), 0.0, 0.165);
+    let vertDiffuse = clamp(dt * 0.75, 0.0, 0.026);
     let settleAlpha = clamp(dt * 2.80, 0.0, 0.090);
-    let drainedSelf = select(bCenter * (1.0 - settleAlpha), bCenter, iy == 0);
+    let bedDecay = exp(-dt * mix(0.095, 0.28, smoothstep(halfXZ * 0.35, halfXZ * 0.78, rHoriz)));
+    let drainedSelf = select(bCenter * (1.0 - settleAlpha), bCenter, iy == 0) * bedDecay;
     let settledFromAbove = select(bAbove * settleAlpha, 0.0, iy >= 7);
     let advectedBed = drainedSelf + settledFromAbove;
     let smoothedBed = mix(mix(advectedBed, bHoriz, spreadAlpha), 0.5 * (bAbove + bBelow), vertDiffuse);
-    let topBedFade = 1.0 - 0.35 * smoothstep(4.0, 7.0, f32(iy));
-    cRouleauxBed = (smoothedBed + dmTransfer * floorBedCapture * 0.94) * topBedFade;
+    let topBedFade = 1.0 - 0.38 * smoothstep(3.5, 7.0, f32(iy));
+    cRouleauxBed = (smoothedBed + dmTransfer * floorBedCapture * 0.68) * topBedFade;
     if (cRouleauxBed < 1.0e-6) {
       cRouleauxBed = 0.0;
     }
   }
 
-  // 3. Reconstruct total intact erythrocyte + rouleaux density (.r) with mass-conserving sub-voxel shoulder smoothing
-  let wallSponge = 1.0 - smoothstep(halfXZ * 0.88, halfXZ * 0.995, max(abs(p.x), abs(p.z)));
-  let maxBedProfile = 0.88 * exp(-0.52 * f32(iy));
+  // 3. Reconstruct total intact erythrocyte + bottom pool density (.r) with circular radial domain feathering (zero square corners!)
+  let wallSponge = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, rHoriz);
+  let floorRadialTaper = 1.0 - smoothstep(halfXZ * 0.52, halfXZ * 0.88, rHoriz);
+  let maxBedProfile = 0.54 * exp(-0.56 * f32(iy)) * floorRadialTaper;
   cRouleauxBed = min(cRouleauxBed * wallSponge, maxBedProfile);
   let cParcelRaw = f32(rawIntact) * ${(1.0 / SPLAT_FP_SCALE).toExponential(8)};
-  let cParcelIntact = mix(cParcelRaw, lapIntact, 0.34) * wallSponge;
+  let shoulderFeather = select(0.18, 0.36, rawIntact > 0u);
+  let cParcelIntact = mix(cParcelRaw, lapIntact, shoulderFeather) * wallSponge;
   let cIntact = cParcelIntact + cRouleauxBed;
   cLysed = cLysed * wallSponge;
 

@@ -472,9 +472,9 @@ export class MultiDropSystem {
     s.stepDrainedVolume += dVol;
     s.radius = nextVol > 0.0 ? radiusFromVolume(nextVol) : 0.0;
 
-    // Crisp (~0.11-0.15s) C0/C1-continuous inertial dome plunge directly into the live FFT crater floor,
-    // eliminating the slow plastic gumdrop sit on the surface while releasing the cavity to rebound naturally.
-    const tauSlump = clamp(0.125 * (s.impactRadius / INITIAL_DROP_RADIUS), 0.09, 0.155);
+    // Fast (~0.18-0.24s) C0/C1-continuous inertial dome slump directly into the live FFT crater floor,
+    // releasing the cavity so the 256x256 gravity-capillary solver freely rebounds into a central swell.
+    const tauSlump = clamp(0.20 * (s.impactRadius / INITIAL_DROP_RADIUS), 0.14, 0.24);
     const sNorm = Math.min(1.0, s.ageInPhase / tauSlump);
     const slumpSmooth = smoothstep(0.0, 1.0, sNorm);
     const vImpact = Math.min(s.impactVelY, -0.18);
@@ -483,8 +483,8 @@ export class MultiDropSystem {
       WATER_SURFACE_Y +
       s.impactRadius +
       vImpact * Math.min(s.ageInPhase, tauSlump) -
-      2.22 * s.impactRadius * slumpSmooth * slumpSmooth -
-      0.115 * Math.max(0.0, s.ageInPhase - tauSlump);
+      1.98 * s.impactRadius * slumpSmooth * slumpSmooth -
+      0.095 * Math.max(0.0, s.ageInPhase - tauSlump);
 
     s.oscillation =
       (s.oscAtContact * (1.0 - smoothstep(0.0, 0.35, sNorm)) -

@@ -35,31 +35,54 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function isPortOpen(port) {
+async function isBloodDropServerOpen(port) {
   for (const host of ['localhost', '127.0.0.1']) {
     try {
       const res = await fetch(`http://${host}:${port}/`, { signal: AbortSignal.timeout(600) });
-      if (res.ok || res.status < 500) return true;
+      if (res.ok) {
+        const html = await res.text();
+        if (html.includes('Drop of Blood') || html.includes('1000 FPS SLOW-MO')) {
+          return true;
+        }
+      }
     } catch {}
   }
   return false;
 }
 
+async function isPortInUse(port) {
+  for (const host of ['localhost', '127.0.0.1']) {
+    try {
+      const res = await fetch(`http://${host}:${port}/`, { signal: AbortSignal.timeout(400) });
+      if (res.status > 0) return true;
+    } catch {}
+  }
+  return false;
+}
+
+let activeDevPort = DEV_PORT;
 async function ensureDevServer() {
-  if (await isPortOpen(DEV_PORT)) {
-    return null;
+  for (let p = DEV_PORT; p < DEV_PORT + 15; p++) {
+    if (await isBloodDropServerOpen(p)) {
+      activeDevPort = p;
+      return null;
+    }
+    if (!(await isPortInUse(p))) {
+      activeDevPort = p;
+      break;
+    }
   }
   const viteBin = path.join(ROOT_DIR, 'node_modules', '.bin', 'vite');
-  const devProc = spawn(viteBin, ['--port', String(DEV_PORT), '--strictPort'], {
+  const devProc = spawn(viteBin, ['--port', String(activeDevPort), '--strictPort'], {
     cwd: ROOT_DIR,
     stdio: 'ignore',
   });
   for (let i = 0; i < 40; i++) {
-    if (await isPortOpen(DEV_PORT)) return devProc;
+    if (await isBloodDropServerOpen(activeDevPort)) return devProc;
     await sleep(150);
   }
   devProc.kill('SIGKILL');
-  throw new Error(`Timed out waiting for Vite dev server on port ${DEV_PORT}`);
+  throw new Error(`Timed out waiting for Vite dev server on port ${activeDevPort}`);
 }
 
 async function getWsUrl() {
@@ -325,10 +348,9 @@ async function runLiveExplorationAudit(cdp, snap) {
   await cdp.eval(`(async () => {
     const eng = window.__BLOOD_ENGINE__;
     eng.setLightingMode(0);
-    eng.setCameraPreset('hero', true);
+    eng.setCameraPreset('crown', true);
     eng.resetSimulation(1.0);
     await eng.seekToSimTime(2.00, 1.0);
-    eng.camera.syncHeroFollow(2.00, true);
     eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
   })()`);
   const wave2p0 = await cdp.eval('window.__QA__.readWaveStats()');
@@ -340,7 +362,6 @@ async function runLiveExplorationAudit(cdp, snap) {
   await cdp.eval(`(async () => {
     const eng = window.__BLOOD_ENGINE__;
     await eng.seekToSimTime(4.20, 1.0);
-    eng.camera.syncHeroFollow(4.20, true);
     eng.camera.updateMatrices(eng.canvas.width / eng.canvas.height);
   })()`);
   const wave4p2 = await cdp.eval('window.__QA__.readWaveStats()');
@@ -400,12 +421,35 @@ async function runLiveExplorationAudit(cdp, snap) {
   })()`);
   await snap('lv_05_sideon_aquarium_t2p3s.png');
 
+  // 7. Top-down camera view (elev = +1.36) across multiple drops + late settling (verifying zero bioluminescent bloom, zero square checkerboard, and full-canvas ripples)
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.setLightingMode(0);
+    eng.resetSimulation(1.3);
+    eng.multiDrops.clearSlot(eng.multiDrops.slots[0]);
+    eng.triggerQuickPipetteDrop([-0.14, 0.05], 0.056);
+    await eng.seekToSimTime(1.10, 1.3);
+    eng.triggerQuickPipetteDrop([0.11, -0.06], 0.060);
+    await eng.seekToSimTime(2.05, 1.3);
+    eng.triggerQuickPipetteDrop([-0.03, -0.13], 0.054);
+    await eng.seekToSimTime(2.65, 1.3);
+    window.__QA__.setCam(0.0, 1.36, 1.32, [0.0, 0.10, 0.0]);
+  })()`);
+  await snap('lv_06_topdown_multidrop.png');
+  await cdp.eval(`(async () => {
+    const eng = window.__BLOOD_ENGINE__;
+    eng.resetSimulation(1.0);
+    await eng.seekToSimTime(3.35, 1.0);
+    window.__QA__.setCam(0.0, 1.36, 1.32, [0.0, 0.10, 0.0]);
+  })()`);
+  await snap('lv_07_topdown_settling_t3p35s.png');
+
   const sheet = await buildContactSheet(cdp, 'live_fixes_sheet.jpg', 3, 2, [
     { file: 'lv_00_quick_pipette_squeeze.png', label: '1. Quick Pipette Squeeze + XDR sRGB' },
     { file: 'lv_01_settling_ripples_t4p2s.png', label: '5. Settling Ripples (0 Red Sonar Echo)' },
+    { file: 'lv_06_topdown_multidrop.png', label: 'Top-Down Multi-Drop (Full-Canvas Ripples)' },
+    { file: 'lv_07_topdown_settling_t3p35s.png', label: 'Top-Down t=3.35s (0 Square Checkerboard)' },
     { file: 'lv_02_multi_drop_plumes_t8p5s.png', label: '2. 3-Drop Unfurling Curtains (t=8.5s)' },
-    { file: 'lv_03_aging_hemolysis_t19s.png', label: '3. Aged Hemolysis t=19s (0 Green Streaks)' },
-    { file: 'lv_04_cuvette_floor_orbit.png', label: '4A. Cuvette Glass Base + Flat Sediment' },
     { file: 'lv_05_sideon_aquarium_t2p3s.png', label: '4C. Side-On Aquarium View (t=2.3s)' },
   ]);
 
@@ -437,7 +481,7 @@ async function main() {
       '--disable-renderer-backgrounding',
       '--window-size=1280,800',
       '--force-device-scale-factor=2',
-      APP_URL,
+      `http://localhost:${activeDevPort}/?zen=1`,
     ],
     { stdio: 'ignore' }
   );
@@ -598,7 +642,7 @@ async function main() {
             if (e < minEta) minEta = e;
             if (e > maxEta) maxEta = e;
             if (i > 0) {
-              const s = Math.abs(e - f[(i - 1) * 4]) / (1.4 / 256.0);
+              const s = Math.abs(e - f[(i - 1) * 4]) / (3.2 / 256.0);
               if (s > maxSlope) maxSlope = s;
             }
           }
@@ -1050,8 +1094,8 @@ async function main() {
     if (PRESET_MATRIX) {
       const pmResult = await runPresetMatrix(cdp, snap);
       const pmFailures = [];
-      if (pmResult.heroSubState.camPosY <= 0.30 || pmResult.heroSubState.camElev <= 0.20) {
-        pmFailures.push(`Hero Follow camera dived into 50/50 TIR split: ${JSON.stringify(pmResult.heroSubState)}`);
+      if (pmResult.heroSubState.camPosY >= 0.20 || pmResult.heroSubState.camElev >= -0.14) {
+        pmFailures.push(`Hero Follow camera did not submerge cleanly below meniscus: ${JSON.stringify(pmResult.heroSubState)}`);
       }
       if (!pmResult.crownHold.visibleInFrustum || Math.abs(pmResult.crownHold.pipetteTipNdcY) > 0.96) {
         pmFailures.push(`Crown preset clipped PIPETTE_TIP_Y = 0.55: ${JSON.stringify(pmResult.crownHold)}`);
@@ -1191,8 +1235,8 @@ async function main() {
       }
     }
     if (pmFullResult) {
-      if (pmFullResult.heroSubState.camPosY <= 0.30 || pmFullResult.heroSubState.camElev <= 0.20) {
-        gateFailures.push(`Hero Follow camera dived into 50/50 TIR split: ${JSON.stringify(pmFullResult.heroSubState)}`);
+      if (pmFullResult.heroSubState.camPosY >= 0.20 || pmFullResult.heroSubState.camElev >= -0.14) {
+        gateFailures.push(`Hero Follow camera did not submerge cleanly below meniscus: ${JSON.stringify(pmFullResult.heroSubState)}`);
       }
       if (!pmFullResult.crownHold.visibleInFrustum || Math.abs(pmFullResult.crownHold.pipetteTipNdcY) > 0.96) {
         gateFailures.push(`Crown preset clipped PIPETTE_TIP_Y = 0.55: ${JSON.stringify(pmFullResult.crownHold)}`);

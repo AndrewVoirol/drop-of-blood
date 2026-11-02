@@ -108,22 +108,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let r = length(worldXZ - dropXZ);
 
       // Exact 2D polar zero-integral Ricker wavelet: int_0^inf r * exp(-r^2) * (1 - r^2) dr == 0
-      // Single momentum-coupled entry crater + sharp wetting-line capillary impulse (zero delayed rebound piston;
-      // central Worthington swell & dispersive capillary precursor train emerge purely from the unitary FFT PDE!)
-      let rFootprint = clamp(rDrop * 0.68, 0.016, 0.052);
+      // Single momentum-coupled entry crater + wetting-line capillary impulse
+      let rFootprint = clamp(rDrop * 1.05, 0.024, 0.082);
       let rNorm = r / rFootprint;
       let emergNorm = (slot.posAndRadius.y - u.surfaceParams.x) / max(rDrop, 0.018);
       let excavGate = smoothstep(-0.78, -0.04, emergNorm);
       let impactBell = sin(clamp((1.05 - emergNorm) / 1.83, 0.0, 1.0) * 3.14159265) * excavGate;
       let impactShape = exp(-rNorm * rNorm) * (1.0 - rNorm * rNorm);
-      let dynImpulse = (14.2 * impactBell * (rDrop / 0.056)) * (0.72 + 2.65 * speedY);
+      let dynImpulse = (6.8 * impactBell * (rDrop / 0.056)) * (0.72 + 2.65 * speedY);
 
-      // Wetting-neck capillary meniscus contact impulse exciting high-k (2-8 mm) dispersive precursor wavelets
-      let rCap = clamp(rDrop * 0.25, 0.0105, 0.0185);
+      // Wetting-neck capillary meniscus contact impulse exciting dispersive precursor wavelets
+      let rCap = clamp(rDrop * 0.52, 0.018, 0.036);
       let rNormCap = r / rCap;
       let capWindow = smoothstep(-0.35, 0.28, emergNorm) * (1.0 - smoothstep(0.68, 1.06, emergNorm));
       let capShape = exp(-rNormCap * rNormCap) * (1.0 - rNormCap * rNormCap);
-      let capImpulse = (8.8 * capWindow * (0.60 + 0.40 * (rDrop / 0.056))) * (0.65 + 2.20 * speedY);
+      let capImpulse = (3.4 * capWindow * (0.60 + 0.40 * (rDrop / 0.056))) * (0.65 + 2.20 * speedY);
 
       forceDrops = forceDrops - dynImpulse * impactShape - capImpulse * capShape;
       activeExcav = max(activeExcav, excavGate * exp(-0.5 * rNorm * rNorm));
@@ -146,24 +145,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var forceSubsurface = 0.0;
   let halfXZ = u.domainBounds.x;
   let subsurfGate = clamp(activeExcav * 1.4 + smoothstep(0.0, 0.06, maxDrain), 0.0, 1.0);
-  if (subsurfGate > 0.001 && abs(worldXZ.x) < halfXZ * 0.94 && abs(worldXZ.y) < halfXZ * 0.94) {
+  if (subsurfGate > 0.001 && length(worldXZ) < halfXZ * 0.94) {
     let tankUV = (worldXZ + vec2<f32>(halfXZ)) / (2.0 * halfXZ);
     let topUVW = vec3<f32>(tankUV.x, 0.988, tankUV.y);
     let vSubY = textureSampleLevel(velMacIn, linSampler, topUVW, 0.0).y;
-    let wallTaper = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, max(abs(worldXZ.x), abs(worldXZ.y)));
+    let wallTaper = 1.0 - smoothstep(halfXZ * 0.62, halfXZ * 0.92, length(worldXZ));
     let nonSuctionV = max(vSubY, 0.0);
     forceSubsurface = clamp(nonSuctionV, 0.0, 0.48) * 0.42 * wallTaper * subsurfGate;
   }
 
   vel = vel + (forceDrops + forceMarangoni + forceSubsurface) * dt;
 
-  // Non-reflecting square Rayleigh velocity-damping absorber outside the cuvette (|x|,|z| > 0.50),
-  // eliminating the circular pinned-drumhead boundary that bounced sonar echoes radially back to (0, 0)!
-  let dBox = max(abs(worldXZ.x), abs(worldXZ.y));
-  let absorbZone = smoothstep(0.50, 0.692, dBox);
+  // Non-reflecting radial Rayleigh velocity-damping absorber beyond the viewport horizon (r > 0.90 m),
+  // eliminating any square grid-wall checkerboard interference or inward drumhead reflections!
+  let rDist = length(worldXZ);
+  let absorbZone = smoothstep(0.90, 1.54, rDist);
   let rayleighDamp = exp(-dt * (24.0 * absorbZone * absorbZone));
-  let borderZero = 1.0 - smoothstep(0.665, 0.698, dBox);
-  eta = clamp(eta * mix(1.0, rayleighDamp, 0.50) * borderZero, -0.14, 0.14);
+  let borderZero = 1.0 - smoothstep(1.22, 1.56, rDist);
+  eta = clamp(eta * rayleighDamp * borderZero, -0.14, 0.14);
   vel = clamp(vel * rayleighDamp * borderZero, -1.8, 1.8);
   crimsonFilm = crimsonFilm * borderZero;
 
@@ -298,10 +297,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let sigmaOverRho = 0.0024;
   let omega = sqrt(max((gEff * k + sigmaOverRho * k * k2) * tanhKH, 1e-8));
 
-  // Physical slow-motion viscous capillary-gravity damping + smooth high-k spectral de-aliasing roll-off near k_Nyquist = 574:
-  // Ripples radiate cleanly across the cuvette once and settle naturally over ~3.5-4.5s without multi-second sloshing!
-  let viscRate = 0.56 + 0.00018 * k2;
-  let nyquistRoll = 1.0 - smoothstep(400.0, 555.0, k);
+  // Physical slow-motion viscous capillary-gravity damping + smooth high-k spectral de-aliasing roll-off:
+  // Ripples radiate cleanly across the open canvas and settle naturally without multi-second sloshing!
+  let viscRate = 0.36 + 0.00028 * k2;
+  let nyquistRoll = 1.0 - smoothstep(185.0, 245.0, k);
   let damp = exp(-viscRate * dt) * nyquistRoll;
 
   let phase = omega * dt;
@@ -361,8 +360,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let uv = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / ${WAVE_GRID_SIZE.toFixed(1)};
   let worldXZ = waveUVToWorldXZ(uv);
-  let dBox = max(abs(worldXZ.x), abs(worldXZ.y));
-  let borderZero = 1.0 - smoothstep(0.665, 0.698, dBox) + u.surfaceParams.x * 0.0;
+  let rDist = length(worldXZ);
+  let borderZero = 1.0 - smoothstep(1.22, 1.56, rDist) + u.surfaceParams.x * 0.0;
 
   let etaOut = clamp(prop.x * borderZero, -0.14, 0.14);
   let velOut = clamp(prop.y * borderZero, -1.8, 1.8);

@@ -159,8 +159,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let zStrat = select((r3.z - 0.16 * slugWeight) / max(1.0 - 0.16 * slugWeight, 0.5), r3.z * 3.6, isCapVeil);
   let posY = neckTopY - mix(0.0012, 0.013, clamp(zStrat, 0.0, 1.0));
 
-  // Outer water-sheared contact perimeter starts with slight osmotic pre-swelling; inner core enters 100% intact
-  let initLysis = 0.12 * smoothstep(0.74, 1.0, radFrac);
+  // Outer water-sheared contact perimeter AND smaller satellite droplets start with higher osmotic pre-swelling
+  // so small drops and outer veils disperse rapidly into soft diffusing clouds while large drops penetrate deeper
+  let smallDropFragility = 1.0 - smoothstep(0.022, 0.056, rDrop);
+  let rimExposure = smoothstep(0.58, 1.0, radFrac);
+  let initLysis = clamp(0.14 * rimExposure + 0.28 * smallDropFragility * (0.45 + 0.55 * radFrac), 0.0, 0.44);
   let tangentDir = vec3<f32>(-sin(theta) * max(radFrac, 0.25), -0.80, cos(theta) * max(radFrac, 0.25));
   let initStretch = normalize(tangentDir) * 0.0036;
 
@@ -199,7 +202,23 @@ fn sampleVelWorld(p: vec3<f32>, rouleauxMaturity: f32) -> vec3<f32> {
   let monoSettle = rouleauxFall * settleGate;
   let stackSettle = mix(0.032, 0.062, smoothstep(0.04, 0.48, depthBelowSurf));
   let effSettle = mix(monoSettle, stackSettle, rouleauxMaturity);
-  return textureSampleLevel(velCenterIn, linSampler, uvw, 0.0).xyz + vec3<f32>(0.0, -effSettle, 0.0);
+
+  // Sub-grid divergence-free curl unfurling active below the initial vortex roll-up (depth > 3.5 cm),
+  // opening descending rings into delicate, coalescing 3D tendrils and dispersing curtains as they settle!
+  let deepUnfurl = smoothstep(0.035, 0.22, depthBelowSurf);
+  var subGridCurl = vec3<f32>(0.0);
+  if (deepUnfurl > 0.001) {
+    let tPhase = u.cameraPosAndTime.w * 0.46;
+    let a1 = p.x * 18.5 + p.z * 14.2 + p.y * 11.3 + tPhase;
+    let a2 = p.z * 21.3 - p.x * 16.7 + p.y * 13.9 - tPhase * 0.82;
+    let a3 = p.x * 31.0 + p.z * 27.0 - p.y * 23.0 + tPhase * 1.15;
+    let vxCurl = (14.2 * cos(a1) + 21.3 * cos(a2) + 27.0 * sin(a3) * 0.42) * 0.00068 * deepUnfurl;
+    let vzCurl = (-18.5 * cos(a1) + 16.7 * cos(a2) - 31.0 * sin(a3) * 0.42) * 0.00068 * deepUnfurl;
+    let vyCurl = sin(a1 * 0.75 - a2 * 0.65) * 0.0036 * deepUnfurl * smoothstep(0.08, 0.30, depthBelowSurf);
+    subGridCurl = vec3<f32>(vxCurl, vyCurl, vzCurl);
+  }
+
+  return textureSampleLevel(velCenterIn, linSampler, uvw, 0.0).xyz + vec3<f32>(0.0, -effSettle, 0.0) + subGridCurl;
 }
 
 fn splatTrilinearIntact(uvw: vec3<f32>, mass: f32) {
@@ -305,9 +324,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let v3 = sampleVelWorld(pos + 0.75 * v2 * dt, rouleauxMaturity);
       vAdv = (2.0 / 9.0) * v1 + (3.0 / 9.0) * v2 + (4.0 / 9.0) * v3;
     }
-    // Viscous floor contact damping as intact RBCs settle onto the y = -0.98 glass tank bottom
-    let floorSlip = smoothstep(yMin + 0.005, yMin + 0.036, pos.y);
-    vAdv = vec3<f32>(vAdv.x * mix(0.28, 1.0, floorSlip), vAdv.y * mix(0.15, 1.0, floorSlip), vAdv.z * mix(0.28, 1.0, floorSlip));
+    // Viscous floor contact damping + radial outward boundary-layer cushion glide on y = -0.98
+    let floorSlip = smoothstep(yMin + 0.005, yMin + 0.042, pos.y);
+    let rXZFloor = length(pos.xz);
+    let floorOutward = select(vec2<f32>(0.0), (pos.xz / max(rXZFloor, 1e-4)) * (0.016 * (1.0 - floorSlip) * smoothstep(0.01, 0.22, rXZFloor)), rXZFloor > 1e-4);
+    vAdv = vec3<f32>(
+      vAdv.x * mix(0.45, 1.0, floorSlip) + floorOutward.x,
+      vAdv.y * mix(0.15, 1.0, floorSlip),
+      vAdv.z * mix(0.45, 1.0, floorSlip) + floorOutward.y
+    );
     pos = pos + vAdv * dt;
     pos.y = clamp(pos.y, yMin + 0.0055, u.surfaceParams.x - 0.0018);
 
@@ -333,23 +358,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let uvw = worldToUVW(pos, u);
-  // Lateral outer-wall boundary sponge only (NO yMin floor deletion sponge: settled RBCs form a persistent floor pool!)
-  let wallSponge = 1.0 - smoothstep(halfXZ * 0.89, halfXZ * 0.992, max(abs(pos.x), abs(pos.z)));
-  mass = mass * wallSponge;
-  if (mass <= 1e-5 || uvw.x <= 0.002 || uvw.x >= 0.998 || uvw.z <= 0.002 || uvw.z >= 0.998 || uvw.y >= 0.998) {
+  // Circular radial outer-domain sponge (zero square/diamond floor tile boundary!)
+  let rHoriz = length(pos.xz);
+  let wallSponge = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, rHoriz);
+  mass = mass * mix(1.0, wallSponge, clamp(dt * 6.0, 0.0, 1.0));
+  if (mass <= 1e-5 || rHoriz >= halfXZ * 0.95 || uvw.x <= 0.002 || uvw.x >= 0.998 || uvw.z <= 0.002 || uvw.z >= 0.998 || uvw.y >= 0.998) {
     p.posAndMass.w = 0.0;
     particles[gid.x] = p;
     return;
   }
 
-  // Gradual mass-conserving consolidation of floor-settled RBC parcels into the persistent Eulerian rouleaux bed (conc.a)
-  // via splatLysed in the floor capture zone, preserving settled floor mass across >8-drop ring-buffer wraparounds!
-  if (dt > 0.0 && pos.y < yMin + 0.024) {
-    let settleWeight = 1.0 - smoothstep(yMin + 0.005, yMin + 0.024, pos.y);
-    let dmBed = mass * clamp(settleWeight * dt * 1.55, 0.0, 0.085);
+  // Gradual mass-conserving consolidation of floor-settled RBC parcels into the Eulerian bottom pool (conc.a)
+  // with slow osmotic dissolution so settled pools spread radially and softly clear rather than forming a permanent slab
+  if (dt > 0.0 && pos.y < yMin + 0.026) {
+    let settleWeight = 1.0 - smoothstep(yMin + 0.005, yMin + 0.026, pos.y);
+    let dmBed = mass * clamp(settleWeight * dt * 1.65, 0.0, 0.095);
     if (dmBed > 1e-7) {
       mass = max(0.0, mass - dmBed);
-      splatTrilinearLysed(clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), dmBed);
+      splatTrilinearLysed(clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), dmBed * 0.68);
     }
     if (mass <= 1e-5) {
       p.posAndMass.w = 0.0;
@@ -358,22 +384,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  // 3. Hypotonic Osmotic Hemolysis with Coherent Rouleaux Resistance:
-  //    Skip 75.5MB concIn DRAM fetch once parcel has reached its rouleaux-stabilized minIntactMass floor or settled into floor bed!
+  // 3. Hypotonic Osmotic Hemolysis with Dilution- & Size-Coupled Dispersion:
+  //    Small drops, outer skirts, and dilute tendrils disperse rapidly into translucent ruby hemoglobin,
+  //    while dense vortex-ring cores retain cohesive structure during initial descent before unfurling!
   let cellRes = fract(f32(gid.x) * 0.6180339887 + 0.17);
-  let minIntactMass = ${INITIAL_PARCEL_VOXEL_MASS.toFixed(5)} * mix(0.68, 0.84, cellRes);
+  let cSample = textureSampleLevel(concIn, linSampler, clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), 0.0);
+  let cNeighborhood = cSample.r + cSample.g;
+  let diluteExposure = 1.0 - smoothstep(0.012, 0.22, cNeighborhood);
+  let ageDispersion = smoothstep(1.1, 7.8, parcelAge + diluteExposure * 2.2 + lysis * 2.5);
+  let minIntactMass = ${INITIAL_PARCEL_VOXEL_MASS.toFixed(5)} * mix(mix(0.46, 0.64, cellRes), mix(0.07, 0.20, cellRes), ageDispersion);
   let lysableHeadroom = mass - minIntactMass;
-  let floorShelter = smoothstep(yMin + 0.028, yMin + 0.068, pos.y);
+  let floorShelter = smoothstep(yMin + 0.024, yMin + 0.062, pos.y);
   if (dt > 0.0 && lysableHeadroom > 1e-7 && floorShelter > 0.02) {
-    let cSample = textureSampleLevel(concIn, linSampler, clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), 0.0);
-    let cNeighborhood = cSample.r + cSample.g;
-    let shearActivity = mix(0.02, 1.0, smoothstep(0.0052, 0.0220, speed2));
-    let waterExposure = (1.0 - smoothstep(0.012, 0.24, cNeighborhood)) * floorShelter * shearActivity;
+    let shearActivity = mix(0.22, 1.0, smoothstep(0.0005, 0.0120, speed2));
+    let waterExposure = (1.0 - 0.72 * smoothstep(0.016, 0.30, cNeighborhood)) * floorShelter * shearActivity;
     let kLysis = u.lensAndRheology.w;
-    lysis = clamp(lysis + kLysis * (1.35 * waterExposure) * dt, 0.0, 0.98);
+    lysis = clamp(lysis + kLysis * (1.85 * waterExposure) * dt, 0.0, 0.98);
 
-    let fragility = smoothstep(0.10, 0.65, lysis) * waterExposure;
-    let dmLysed = min(lysableHeadroom, mass * clamp(fragility * kLysis * 1.45 * dt, 0.0, 0.14));
+    let fragility = smoothstep(0.04, 0.48, lysis) * waterExposure;
+    let dmLysed = min(lysableHeadroom, mass * clamp(fragility * kLysis * 1.95 * dt, 0.0, 0.16));
     if (dmLysed > 1e-7) {
       mass = max(0.0, mass - dmLysed);
       splatTrilinearLysed(clamp(uvw, vec3<f32>(0.002), vec3<f32>(0.998)), dmLysed);

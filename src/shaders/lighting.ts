@@ -86,7 +86,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (all(waveUV >= vec2<f32>(0.01)) && all(waveUV <= vec2<f32>(0.99))) {
     let wSample = textureSampleLevel(waveIn, linSampler, waveUV, 0.0);
     let depthFactor = smoothstep(0.0, 0.30, u.surfaceParams.x - p.y);
-    caustic = clamp(1.0 - wSample.b * 52.0 * depthFactor * u.opticalParams.z, 0.55, 1.95);
+    caustic = clamp(1.0 - wSample.b * 28.0 * depthFactor * u.opticalParams.z, 0.72, 1.38);
   }
 
   // Account for overhead shadow/ball-lens caustic of any active aerial/pendant drops above the meniscus

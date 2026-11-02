@@ -340,42 +340,22 @@ export class BloodDropEngine {
       throw new Error('Unable to acquire a WebGPU canvas context.');
     }
     const preferredSdrFormat = navigator.gpu.getPreferredCanvasFormat();
-    const hdrQuery =
-      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-        ? window.matchMedia('(dynamic-range: high)')
-        : null;
-
-    let format: GPUTextureFormat = preferredSdrFormat;
-    let isExtendedHdr = false;
-    if (hdrQuery?.matches) {
-      try {
-        context.configure({
-          device,
-          format: 'rgba16float',
-          alphaMode: 'opaque',
-          toneMapping: { mode: 'extended' },
-        });
-        format = 'rgba16float';
-        isExtendedHdr = true;
-      } catch {
-        isExtendedHdr = false;
-      }
-    }
-    if (!isExtendedHdr) {
-      try {
-        context.configure({
-          device,
-          format: preferredSdrFormat,
-          alphaMode: 'opaque',
-          toneMapping: { mode: 'standard' },
-        });
-      } catch {
-        context.configure({
-          device,
-          format: preferredSdrFormat,
-          alphaMode: 'opaque',
-        });
-      }
+    const hdrQuery: MediaQueryList | null = null;
+    const format: GPUTextureFormat = preferredSdrFormat;
+    const isExtendedHdr = false;
+    try {
+      context.configure({
+        device,
+        format: preferredSdrFormat,
+        alphaMode: 'opaque',
+        toneMapping: { mode: 'standard' },
+      });
+    } catch {
+      context.configure({
+        device,
+        format: preferredSdrFormat,
+        alphaMode: 'opaque',
+      });
     }
 
     device.pushErrorScope('validation');

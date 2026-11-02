@@ -354,12 +354,21 @@ describe('OrbitCamera & WebGPU ZO matrix math', () => {
     const cam = new OrbitCamera(CAMERA_PRESETS.hero);
     expect(cam.followHeroEnabled).toBe(true);
 
-    for (const t of [0.0, 0.5, IMPACT_TIME, 1.15, 1.85, 2.85, 4.0, 12.0]) {
+    // Pre-impact & entry window stays above WATER_SURFACE_Y (+0.30) with PIPETTE_TIP_Y inside frustum
+    for (const t of [0.0, 0.5, IMPACT_TIME, 1.15]) {
       cam.syncHeroFollow(t, true);
       cam.updateMatrices(16 / 10);
       expect(cam.position[1]).toBeGreaterThan(WATER_SURFACE_Y + 0.24);
       expect(cam.elevation).toBeGreaterThan(0.25);
       expect(Math.abs(projectTipNdcY(cam))).toBeLessThanOrEqual(0.95);
+    }
+
+    // Post-entry crane trajectory smoothly submerges below WATER_SURFACE_Y (+0.30) to frame the descending vortex plume & underside meniscus ripples
+    for (const t of [2.85, 3.6, 4.0, 12.0]) {
+      cam.syncHeroFollow(t, true);
+      cam.updateMatrices(16 / 10);
+      expect(cam.position[1]).toBeLessThan(WATER_SURFACE_Y - 0.14);
+      expect(cam.elevation).toBeLessThan(-0.15);
     }
 
     const crownCam = new OrbitCamera(CAMERA_PRESETS.crown);
@@ -1454,7 +1463,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
 
     // 3. Wave solver decouples downward stem suction and uses elastocapillary dispersion with < 0.35s crater rebound half-period
     expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let nonSuctionV = max(vSubY, 0.0);');
-    expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let wallTaper = 1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, max(abs(worldXZ.x), abs(worldXZ.y)));');
+    expect(WAVE_SPATIAL_FORCE_WGSL).toContain('let wallTaper = 1.0 - smoothstep(halfXZ * 0.62, halfXZ * 0.92, length(worldXZ));');
     expect(WAVE_SPECTRAL_PROPAGATE_WGSL).toContain('let gEff = 0.84;');
     expect(WAVE_SPECTRAL_PROPAGATE_WGSL).toContain('let sigmaOverRho = 0.0024;');
     const kCrater = 34.0;
@@ -1663,10 +1672,10 @@ describe('Boundary & adversarial edge-case invariants', () => {
     const thinNeckChord = 0.008;
     expect(Math.exp(-thinNeckChord * 92.0)).toBeGreaterThan(0.45);
 
-    // 2. Capillary Nyquist grid scaling (WAVE_HALF_EXTENT = 0.70 -> dx = 5.47mm, Nyquist = 10.9mm) + unattenuated [-0.48, +0.48] cuvette
-    expect(WAVE_HALF_EXTENT).toBeCloseTo(0.70, 6);
+    // 2. Full-canvas open meniscus grid scaling (WAVE_HALF_EXTENT = 1.60 -> 3.20m span) + unattenuated [-0.48, +0.48] cuvette
+    expect(WAVE_HALF_EXTENT).toBeCloseTo(1.60, 6);
     const waveDx = (2.0 * WAVE_HALF_EXTENT) / WAVE_GRID_SIZE;
-    expect(waveDx).toBeLessThan(0.0056);
+    expect(waveDx).toBeLessThan(0.013);
     expect(WAVE_HALF_EXTENT * 0.72).toBeGreaterThan(0.48);
 
     // 3. Single momentum-coupled PDE crater + capillary contact-line impulse (zero synthetic double-piston reboundImpulse)
@@ -1736,7 +1745,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
       'let surfaceBloodContact = clamp(max(collarProximity, smoothstep(0.004, 0.026, nearSurfConc)), 0.0, 1.0);'
     );
     expect(RENDER_WGSL).toContain(
-      'let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * smoothstep(0.025, 0.14, camRelY);'
+      'let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * (1.0 - smoothstep(0.45, 0.72, -rd.y)) * smoothstep(0.025, 0.14, camRelY);'
     );
   });
 });

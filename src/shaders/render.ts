@@ -46,13 +46,13 @@ fn sampleSpectralLut(tau: f32, lysisFrac: f32) -> vec3<f32> {
 }
 
 fn cuvetteSignedDistXZ(xz: vec2<f32>) -> f32 {
-  let q = abs(xz) - vec2<f32>(0.55 - 0.045);
-  return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - 0.045;
+  // Full-canvas open meniscus horizon inside [-1.60, +1.60] m wave grid (zero container or patch cutoff):
+  return length(xz) - 1.38;
 }
 
 fn evalWaveHeightRaw(xz: vec2<f32>) -> vec4<f32> {
   let dCuv = cuvetteSignedDistXZ(xz);
-  let window = 1.0 - smoothstep(-0.012, 0.032, dCuv);
+  let window = 1.0 - smoothstep(-0.14, 0.06, dCuv);
   if (window <= 0.0001) {
     return vec4<f32>(0.0);
   }
@@ -67,7 +67,7 @@ fn evalWaveHeightRaw(xz: vec2<f32>) -> vec4<f32> {
  */
 fn evalWaveBspline(xz: vec2<f32>) -> vec4<f32> {
   let dCuv = cuvetteSignedDistXZ(xz);
-  let window = 1.0 - smoothstep(-0.012, 0.032, dCuv);
+  let window = 1.0 - smoothstep(-0.14, 0.06, dCuv);
   if (window <= 0.0001) {
     return vec4<f32>(0.0);
   }
@@ -113,7 +113,7 @@ fn evalSurfaceHeightSmooth(xz: vec2<f32>) -> f32 {
 fn evalSurface(xz: vec2<f32>) -> SurfaceInfo {
   let baseY = u.surfaceParams.x;
   let dCuv = cuvetteSignedDistXZ(xz);
-  let window = 1.0 - smoothstep(-0.012, 0.032, dCuv);
+  let window = 1.0 - smoothstep(-0.14, 0.06, dCuv);
   if (window <= 0.0001) {
     var flatInfo: SurfaceInfo;
     flatInfo.height = baseY;
@@ -227,68 +227,28 @@ fn evalStudioBackdrop(rd: vec3<f32>, inWater: bool) -> vec3<f32> {
   }
 
   let brightSoftbox = vec3<f32>(0.865, 0.916, 0.954);
-  let outerCyclorama = vec3<f32>(0.36, 0.465, 0.555);
-  let vignette = pow(centerAlign, 2.1);
+  let outerCyclorama = vec3<f32>(0.44, 0.545, 0.635);
+  let vignette = pow(centerAlign, 1.85);
   var studio = mix(outerCyclorama, brightSoftbox, vignette);
 
   if (inWater) {
-    let depthTint = mix(vec3<f32>(0.72, 0.83, 0.91), vec3<f32>(0.985, 0.996, 1.00), smoothstep(-0.52, 0.18, rd.y));
+    let depthTint = mix(vec3<f32>(0.76, 0.855, 0.925), vec3<f32>(0.975, 0.990, 1.00), smoothstep(-0.58, 0.22, rd.y));
     studio = studio * depthTint;
   } else {
-    let airGrad = mix(vec3<f32>(0.64, 0.735, 0.82), vec3<f32>(0.965, 0.986, 1.005), smoothstep(-0.16, 0.38, rd.y));
-    let overheadGlow = vec3<f32>(0.135, 0.145, 0.16) * smoothstep(0.18, 0.68, rd.y) * pow(max(dot(rd, keyDir), 0.0), 3.8);
-    studio = mix(studio, airGrad, 0.58) + overheadGlow;
+    let airGrad = mix(vec3<f32>(0.70, 0.785, 0.86), vec3<f32>(0.965, 0.986, 1.005), smoothstep(-0.22, 0.40, rd.y));
+    let overheadGlow = vec3<f32>(0.125, 0.135, 0.15) * smoothstep(0.18, 0.68, rd.y) * pow(max(dot(rd, keyDir), 0.0), 3.8);
+    studio = mix(studio, airGrad, 0.54) + overheadGlow;
   }
 
   return studio;
 }
 
 /**
- * Shades the optical borosilicate cuvette base plate at y = u.domainBounds.y (-0.98)
- * so settled floor blood (conc.a) rests physically on a visible glass vessel floor rather than floating in empty space.
+ * Seamless infinite studio floor backdrop (zero synthetic beaker/cuvette disc or faux container outline!).
  */
 fn evalCuvetteFloorBackdrop(ro: vec3<f32>, rd: vec3<f32>, studioBg: vec3<f32>) -> vec3<f32> {
-  let yFloor = u.domainBounds.y;
-  if (rd.y >= -0.006 || ro.y <= yFloor + 0.002) {
-    return studioBg;
-  }
-  let tFloor = (yFloor - ro.y) / rd.y;
-  if (tFloor <= 0.01 || tFloor > 6.5) {
-    return studioBg;
-  }
-  let pFloor = ro + rd * tFloor;
-  let dCuv = cuvetteSignedDistXZ(pFloor.xz);
-  let darkMode = u.opticalParams.w > 0.5;
-
-  // Subtle laboratory studio stage horizon beneath the cuvette + crisp polished borosilicate base plate inside dCuv <= 0.016
-  let stageFade = (1.0 - smoothstep(0.65, 2.6, length(pFloor.xz))) * smoothstep(0.01, 0.12, -rd.y);
-  let stageTone = select(
-    studioBg * mix(1.0, 0.93, stageFade),
-    studioBg + vec3<f32>(0.0015, 0.0025, 0.0042) * stageFade,
-    darkMode
-  );
-  if (dCuv > 0.024) {
-    return stageTone;
-  }
-
-  let plateMask = 1.0 - smoothstep(0.001, 0.018, dCuv);
-  let bevelRim = exp(-pow(dCuv / 0.0095, 2.0));
-  let innerWallShadow = 1.0 - 0.13 * exp(-pow((dCuv + 0.014) / 0.012, 2.0));
-  let rCenter = clamp(length(pFloor.xz) / 0.56, 0.0, 1.0);
-  let fresnelFloor = fresnelDielectric(clamp(-rd.y, 0.0, 1.0), 1.333, 1.517);
-
-  var glassBase: vec3<f32>;
-  if (!darkMode) {
-    let baseTint = mix(vec3<f32>(0.80, 0.875, 0.935), vec3<f32>(0.70, 0.79, 0.865), rCenter * rCenter);
-    glassBase = mix(studioBg * 0.96, baseTint, 0.62) * innerWallShadow
-              + vec3<f32>(0.88, 0.94, 0.99) * (fresnelFloor * 0.35)
-              + vec3<f32>(0.15, 0.185, 0.22) * bevelRim;
-  } else {
-    let darkGlass = mix(vec3<f32>(0.0065, 0.011, 0.019), vec3<f32>(0.0035, 0.006, 0.011), rCenter);
-    glassBase = darkGlass + vec3<f32>(0.055, 0.075, 0.105) * bevelRim + vec3<f32>(0.018, 0.026, 0.038) * fresnelFloor;
-  }
-
-  return mix(stageTone, glassBase, plateMask);
+  let unusedFloor = (ro.y + rd.y) * 0.0;
+  return studioBg + vec3<f32>(unusedFloor);
 }
 
 fn evalDropCenterSlot(slot: DropGpuSlot) -> vec3<f32> {
@@ -425,7 +385,7 @@ fn intersectAerialDropFrom(ro: vec3<f32>, rd: vec3<f32>, tMinRay: f32, tFocus: f
     let radii = evalDropRadiiSlot(slot);
     let rMax = max(radii.x, radii.y);
     let surfCenter = evalSurfaceHeightSmooth(center.xz);
-    let domeAboveFade = select(smoothstep(-0.004, 0.008, center.y + radii.y - surfCenter), 1.0, isPendant);
+    let domeAboveFade = select(smoothstep(0.002, 0.016, center.y + radii.y * 0.75 - surfCenter), 1.0, isPendant);
     if (domeAboveFade <= 0.001) {
       continue;
     }
@@ -824,10 +784,11 @@ fn shadeAerialDrop(
   let dropFinal = mix(bodyColor, effEnvRefl, fresnelWeight)
                 + vec3<f32>(0.97, 0.985, 1.0) * (specKey + rimSheen) * edgeFresDamp;
 
-  // Smoothly hand off foreground analytical drop into translucent meniscus crater during coalescence (no opaque black oval puck!)
+  // Smoothly hand off foreground analytical drop into translucent meniscus crater during coalescence
+  // (preventing a dark opaque pancake disc from lingering on the water surface as the drop submerges!)
   let isDraining = slot.velOscAndDrain.w > 0.0 && slot.velOscAndDrain.z > 0.001;
-  let plungeFade = select(1.0, smoothstep(-0.30 * radii.y, 0.78 * radii.y, center.y - localSurfY), isDraining);
-  let alpha = smoothstep(0.0, 0.28, hit.neckBlend) * hit.edgeCov * plungeFade;
+  let plungeFade = select(1.0, smoothstep(-0.45 * radii.y, 0.15 * radii.y, center.y - localSurfY), isDraining);
+  let alpha = smoothstep(0.04, 0.34, hit.neckBlend) * hit.edgeCov * plungeFade;
   return mix(backdropBehind, dropFinal, alpha);
 }
 
@@ -1958,8 +1919,11 @@ fn marchPlume(
 
       // Duysens (1956) cellular package/sieve optical path vs dispersed molecular lysed-Hb absorption,
       // coupled to Prahl (1999) 380-720nm dichromatic Soret + Q-band LUT driven by physical SO2 & shear (vOxShear):
-      let dTauIntact = cIntact * ds * (1.22 * tauScale);
-      let dTauLysed  = cLysed  * ds * (3.45 * tauScale);
+      // Moderates vertical column optical-depth saturation at steep top-down angles (-rayDir.y > 0.65) so looking down
+      // through the stem and vortex ring preserves luminous ruby-to-oxblood structure rather than a flat black plug!
+      let topDownTauRelief = mix(1.0, 0.56, smoothstep(0.62, 0.94, -rayDir.y) * smoothstep(0.028, 0.18, tauTotal));
+      let dTauIntact = cIntact * ds * (1.22 * tauScale * topDownTauRelief);
+      let dTauLysed  = cLysed  * ds * (2.65 * tauScale * topDownTauRelief);
       let dTau = dTauIntact + dTauLysed;
       tauTotal = tauTotal + dTau;
       tauLysed = tauLysed + dTauLysed;
@@ -2013,13 +1977,14 @@ fn marchPlume(
       // with deep 650-680 nm diffusive red photon transport warming thick venous cores (R >> G, B):
       var stepRad = vec3<f32>(0.0);
       var dfCoherentRim = vec3<f32>(0.0);
+      let topDownCoreWarm = smoothstep(0.55, 0.92, -rayDir.y) * smoothstep(0.04, 0.26, tauTotal);
       if (!darkMode) {
         let fwdTint = mix(vec3<f32>(0.052, 0.0020, 0.0016), vec3<f32>(0.078, 0.0124, 0.0014), thinSheetFactor);
-        let keyTint = mix(vec3<f32>(0.018, 0.0005, 0.0010), vec3<f32>(0.025, 0.0020, 0.0009), vOxShear);
-        let coreTint = mix(vec3<f32>(0.0155, 0.00038, 0.00062), vec3<f32>(0.0120, 0.00046, 0.00072), vOxShear);
+        let keyTint = mix(vec3<f32>(0.021, 0.0006, 0.0010), vec3<f32>(0.028, 0.0022, 0.0009), vOxShear);
+        let coreTint = mix(vec3<f32>(0.0195, 0.00045, 0.00068), vec3<f32>(0.0145, 0.00052, 0.00076), vOxShear);
         let rubyForward = fwdTint * (backIllum * (0.20 + 0.56 * phaseBack)) * orificeScatterDamp;
-        let carmineKey  = keyTint * (keyIllum * (0.28 + 0.48 * phaseKey));
-        let venousMulti = coreTint * (0.24 + 1.18 * multiScat);
+        let carmineKey  = keyTint * (keyIllum * (0.32 + 0.48 * phaseKey + 0.38 * topDownCoreWarm));
+        let venousMulti = coreTint * (0.30 + 1.28 * multiScat + 0.42 * topDownCoreWarm);
         stepRad = (rubyForward + carmineKey + venousMulti) * albedoScale;
       } else {
         // Dark-Field Chiaroscuro: 590-610nm scarlet-vermilion (G/R ~ 0.16) on thin sheared vortex lips -> arterial ruby (G/R ~ 0.03) -> venous oxblood (G/R ~ 0.02)!
@@ -2080,14 +2045,15 @@ fn marchPlume(
         }
       }
 
-      // Physical RTE in-scattering step
+      // Physical RTE in-scattering step:
+      // In Bright-Field (!darkMode), dissolved hemoglobin (cLysed) is a pure molecular absorber (translucent ruby dye in water,
+      // zero additive milky/white fog!), whereas Dark-Field uses subtle Tyndall side-scatter against the black backdrop.
       let scatterProb = 1.0 - exp(-cIntact * ds * 24.0);
       var inScatter = scatterProb * stepRad + dfCoherentRim;
-      if (cLysed > 0.00015) {
+      if (darkMode && cLysed > 0.00015) {
         let beamHalo = 0.26 * (keyIllum + backIllum) + 1.65 * multiScat;
         let haloTransillum = (1.0 - exp(-cLysed * ds * 18.0)) * clamp(beamHalo, 0.0, 0.55);
-        let lysedTint = select(vec3<f32>(0.024, 0.0011, 0.0016), vec3<f32>(0.32, 0.016, 0.012), darkMode);
-        inScatter = inScatter + lysedTint * haloTransillum;
+        inScatter = inScatter + vec3<f32>(0.32, 0.016, 0.012) * haloTransillum;
       }
       out.radiance = out.radiance + out.transmittance * inScatter;
       out.transmittance = lutTrans;
@@ -2111,6 +2077,11 @@ fn marchPlume(
 
 fn evalCausticShafts(ro: vec3<f32>, rd: vec3<f32>, tStart: f32, tMax: f32, jitter: f32, fineQuality: bool) -> vec3<f32> {
   if (u.opticalParams.z <= 0.01 || u.opticalParams.w > 0.5) {
+    return vec3<f32>(0.0);
+  }
+  // Volumetric God-ray shafts occur strictly at low-angle underwater/side lighting — never as a top-down glowing ring!
+  let sideViewGate = 1.0 - smoothstep(0.18, 0.42, abs(rd.y));
+  if (sideViewGate <= 0.001) {
     return vec3<f32>(0.0);
   }
   let t0 = max(tStart, 0.15);
@@ -2139,14 +2110,14 @@ fn evalCausticShafts(ro: vec3<f32>, rd: vec3<f32>, tStart: f32, tMax: f32, jitte
           evalWaveHeightRaw(hitXZ - rDir * 0.0195).b
         );
         let depthFade = smoothstep(0.02, 0.28, u.surfaceParams.x - p.y) * (1.0 - smoothstep(0.55, 1.35, r));
-        let focus = clamp(-lapBroad * 42.0, 0.0, 1.15) * depthFade;
+        let focus = clamp(-lapBroad * 28.0, 0.0, 0.65) * depthFade;
         accum = accum + focus * dt;
       }
     }
   }
 
-  let shaftTint = vec3<f32>(0.055, 0.072, 0.088);
-  return shaftTint * (accum * u.opticalParams.z);
+  let shaftTint = vec3<f32>(0.042, 0.056, 0.068);
+  return shaftTint * (accum * u.opticalParams.z * sideViewGate);
 }
 
 fn evalTopsideBranch(
@@ -2164,7 +2135,7 @@ fn evalTopsideBranch(
   let darkTop = u.opticalParams.w > 0.5;
 
   var tSurf = -1.0;
-  if (camRelY > -0.004) {
+  if (camRelY > -0.025) {
     tSurf = intersectWaterSurface(ro, rd, 0.002, 12.0, true);
   }
   var airBackdrop = mix(evalStudioBackdrop(rd, true), evalStudioBackdrop(rd, false), airBgMix);
@@ -2174,16 +2145,12 @@ fn evalTopsideBranch(
     tSurfOut = tSurf;
     let pSurf = ro + rd * tSurf;
     let dCuvTop = cuvetteSignedDistXZ(pSurf.xz);
-    let inWaveBox = 1.0 - smoothstep(-0.012, 0.055, dCuvTop);
-    let camHorizRaw = vec2<f32>(-ro.x, -ro.z);
-    let camHorizFwd = camHorizRaw / max(length(camHorizRaw), 1e-5);
-    // Keep camera-facing front viewing port optically continuous (zero horizontal prism/tint split across the plume!),
-    // while tapering meniscus reflection outside the rear & lateral cuvette walls.
-    let frontPortPass = smoothstep(0.18, 0.44, dot(pSurf.xz, -camHorizFwd)) * (1.0 - smoothstep(0.50, 0.62, abs(dot(pSurf.xz, vec2<f32>(-camHorizFwd.y, camHorizFwd.x)))));
-    let inCuvetteTop = max(inWaveBox, frontPortPass * (1.0 - smoothstep(1.30, 2.50, length(pSurf.xz))));
+    let inWaveBox = 1.0 - smoothstep(-0.14, 0.06, dCuvTop);
+    // Continuous open-horizon meniscus reflection & refraction across the entire macro field-of-view
+    let inCuvetteTop = 1.0 - smoothstep(1.75, 4.2, length(pSurf.xz));
     // Gate horizontal meniscus Snell downward bending by ray incidence (-rd.y) and camera height (camRelY) —
     // 100% continuous across topside Follow/Crown views (zero prism split at z = +0.55) while opening side-on aquarium views!
-    let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * smoothstep(0.025, 0.14, camRelY);
+    let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * (1.0 - smoothstep(0.45, 0.72, -rd.y)) * smoothstep(0.025, 0.14, camRelY);
     let sSurf = evalSurface(pSurf.xz);
     let nSurf = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), sSurf.normal, (0.35 + 0.65 * opticalDome) * inWaveBox));
     let snellDown = refract(rd, nSurf, 0.75);
@@ -2241,12 +2208,18 @@ fn evalTopsideBranch(
     let capillaryRing = smoothstep(0.0010, 0.014, slopeLen);
     let activeCurve = smoothstep(0.015, 0.14, slopeLen);
     let reflDir = reflect(rd, sInfo.normal);
-    var reflCol = evalStudioBackdrop(reflDir, false) * select(vec3<f32>(1.02, 1.03, 1.04), vec3<f32>(1.0), darkTop);
-    let studioGobo = mix(0.86, 1.08, smoothstep(0.04, 0.58, reflDir.y));
-    reflCol = reflCol * select(mix(1.0, studioGobo, waveSlope), 1.0, darkTop);
+    let topDownReflDamp = 1.0 - smoothstep(0.45, 0.72, -rd.y);
+    let reflEvalDir = normalize(mix(rd, reflDir, topDownReflDamp));
+    var reflCol = evalStudioBackdrop(reflEvalDir, false) * select(vec3<f32>(1.01, 1.02, 1.02), vec3<f32>(1.0), darkTop);
+    let scrimBand = 0.94 + 0.06 * smoothstep(-0.02, 0.34, reflEvalDir.y);
+    let rippleGradMod = 1.0 + capillaryRing * topDownReflDamp * (
+      -0.36 * (1.0 - smoothstep(0.06, 0.34, reflEvalDir.y)) +
+      0.32 * smoothstep(0.26, 0.68, reflEvalDir.y)
+    );
+    reflCol = reflCol * scrimBand * select(rippleGradMod, 1.0, darkTop);
     if (darkTop) {
-      let dfTopRing = exp(-pow((reflDir.y - 0.14) / 0.095, 2.0));
-      reflCol = reflCol + vec3<f32>(0.18, 0.22, 0.28) * (0.30 + 0.70 * dfTopRing) * waveSlope;
+      let dfTopRing = exp(-pow((reflEvalDir.y - 0.14) / 0.095, 2.0));
+      reflCol = reflCol + vec3<f32>(0.18, 0.22, 0.28) * (0.30 + 0.70 * dfTopRing) * waveSlope * topDownReflDamp;
     }
 
     // Signed unfolded optical focal path for virtual water-reflected drops (evaluated at 1:1 Retina in COMPOSITE_WGSL)
@@ -2262,7 +2235,7 @@ fn evalTopsideBranch(
 
     // Optical glass-tank meniscus depth tone + borosilicate floor base plate at y = -0.98
     let zTable = smoothstep(-0.85, 0.65, pPlumeOrigin.z);
-    let calmWaterTone = mix(vec3<f32>(0.865, 0.914, 0.956), vec3<f32>(0.918, 0.952, 0.982), zTable);
+    let calmWaterTone = mix(vec3<f32>(0.892, 0.928, 0.962), vec3<f32>(0.918, 0.952, 0.982), mix(0.5, zTable, topDownReflDamp));
     let waterPlaneTint = select(mix(vec3<f32>(1.0), calmWaterTone, opticalDome * inCuvetteTop), vec3<f32>(1.0), darkTop);
     let rawChamberBg = evalCuvetteFloorBackdrop(pPlumeOrigin, plume.bentDir, evalStudioBackdrop(plume.bentDir, true));
     var refrCol = rawChamberBg * waterPlaneTint + vec3<f32>(unusedReflGuard);
@@ -2361,14 +2334,16 @@ fn evalTopsideBranch(
     let viewSteepness = 0.20 + 0.80 * smoothstep(0.03, 0.28, -rd.y);
     let tangentContinuity = mix(crestCont, 1.0, grazingWaveMix);
 
-    // Pure colorless Fresnel reflection in Bright-Field (zero painted grey rippleRelief bands); subtle rim in Dark-Field
+    // Glassy liquid-meniscus curvature & slope relief across clear-water ripples (damped over submerged blood via clearWaterReliefGate
+    // so ripples passing over the plume never pulse red or wash out the oxblood core!)
+    let topDownDamp = 1.0 - smoothstep(0.42, 0.70, -rd.y);
     let waveRim = pow(max(dot(sInfo.normal, hRim), 0.0), 18.0) * select(0.0, 0.48, darkTop)
-                * opticalDome * (0.12 + 0.88 * waveSlope) * tangentContinuity * inCuvetteTop;
-    let rippleRelief = select(
-      0.0,
-      clamp(-sInfo.lap * 11.0 + sInfo.normal.z * 0.55, 0.0, 0.14) * waveSlope * opticalDome * tangentContinuity * inCuvetteTop,
-      darkTop
-    );
+                * opticalDome * (0.12 + 0.88 * waveSlope) * tangentContinuity * inCuvetteTop * topDownDamp;
+    let rippleRelief = clamp(
+      -sInfo.lap * select(12.0, 9.5, darkTop) + sInfo.normal.z * select(1.45, 0.50, darkTop) * topDownDamp,
+      select(-0.065, -0.008, darkTop),
+      select(0.065, 0.125, darkTop)
+    ) * waveSlope * opticalDome * clearWaterReliefGate * tangentContinuity * inCuvetteTop;
     let darkPlumeRim = select(
       vec3<f32>(0.0),
       vec3<f32>(0.06, 0.005, 0.004) * surfBlood * waveSlope * opticalDome * inCuvetteTop,
@@ -2376,20 +2351,19 @@ fn evalTopsideBranch(
     );
 
     let maxCalmVeil = select(
-      (0.14 * plumeGlareDamp + (0.20 * waveSlope + 0.08 * activeCurve) * clearWaterReliefGate) * opticalDome * viewSteepness * inCuvetteTop,
+      (0.15 * plumeGlareDamp + (0.22 * waveSlope + 0.09 * activeCurve) * clearWaterReliefGate * topDownDamp) * opticalDome * viewSteepness * inCuvetteTop,
       (0.20 + 0.34 * waveSlope) * opticalDome * inCuvetteTop,
       darkTop
     );
     let effTopFresnel = fresnel;
-    let reflWeight = clamp((effTopFresnel + 0.032 * capillaryRing * clearWaterReliefGate) * fresnelCap * inCuvetteTop, 0.0, maxCalmVeil);
-    let floorHitVis = smoothstep(-0.08, -0.015, rd.y);
-    let horizonFade = max(max(inCuvetteTop, bloodInColumn), floorHitVis * 0.95) * (1.0 - smoothstep(1.95, 4.4, length(pPlumeOrigin.xz)) * (1.0 - bloodInColumn));
+    let reflWeight = clamp((effTopFresnel * (0.15 + 0.85 * topDownDamp) + 0.052 * capillaryRing * clearWaterReliefGate * topDownDamp) * fresnelCap * inCuvetteTop, 0.0, maxCalmVeil);
+    let horizonFade = mix(1.0 - smoothstep(1.75, 4.2, length(pPlumeOrigin.xz)), 1.0, bloodInColumn);
     let waterTopCol = mix(refrCol, reflCol, reflWeight)
-                    + vec3<f32>(waveRim * 0.86, waveRim * 0.93, waveRim)
-                    + vec3<f32>(rippleRelief * 0.80, rippleRelief * 0.91, rippleRelief)
+                    + vec3<f32>(waveRim * 0.96, waveRim * 0.98, waveRim)
+                    + vec3<f32>(rippleRelief * 0.96, rippleRelief * 0.98, rippleRelief)
                     + darkPlumeRim;
     airBackdrop = mix(airBackdrop, waterTopCol, clamp(horizonFade, 0.0, 1.0));
-  } else if (camRelY <= 0.022 && rd.y < 0.025) {
+  } else if (camRelY <= 0.032 && rd.y < 0.035) {
     let plume = marchPlume(ro, rd, 0.02, 5.5, tFocus, apRadius, jitter, fineQuality);
     let chamberBg = evalCuvetteFloorBackdrop(ro, plume.bentDir, evalStudioBackdrop(plume.bentDir, true));
     let bgBase = mix(chamberBg, airBackdrop, airBgMix);
@@ -2521,7 +2495,8 @@ fn evalSubmergedBranch(
       var tirBg = evalStudioBackdrop(clearReflDir, true);
       if (!darkMode) {
         let horizonBand = smoothstep(-0.36, -0.020, clearReflDir.y);
-        let clearWaterMod = mix(0.93, 1.05, horizonBand);
+        let ringRelief = clamp(sInfo.normal.z * 2.4 - sInfo.lap * 12.5, -0.22, 0.32) * slopeSignal * craterDamp;
+        let clearWaterMod = mix(mix(0.94, 0.89, craterDamp), mix(1.02, 1.10, craterDamp), horizonBand) + ringRelief;
         let clearTirBg = tirBg * clearWaterMod;
 
         let flatTirDir = normalize(vec3<f32>(rd.x, -max(abs(rd.y), 0.08), rd.z));
@@ -2529,9 +2504,9 @@ fn evalSubmergedBranch(
         tirBg = mix(clearTirBg, diffusedTirBg, max(tirBloodPresence * 0.85, (1.0 - craterDamp) * 0.65));
       } else {
         let dfRingBand = exp(-pow((tirPlume.bentDir.y + 0.13) / 0.095, 2.0));
-        let crestCurv = clamp(0.28 - 14.0 * sInfo.lap, 0.0, 1.35) * slopeSignal * mix(0.35, 1.0, craterDamp);
+        let crestCurv = clamp(0.40 + sInfo.normal.z * 3.2 - 18.0 * sInfo.lap, 0.0, 1.70) * slopeSignal * mix(0.35, 1.0, craterDamp);
         tirBg = tirBg
-              + vec3<f32>(0.16, 0.20, 0.26) * (0.35 + 0.65 * dfRingBand) * crestCurv;
+              + vec3<f32>(0.18, 0.22, 0.28) * (0.35 + 0.65 * dfRingBand) * crestCurv;
       }
       tirBg = mix(smoothBehind, tirBg, turbidSharpness);
 
@@ -2613,7 +2588,7 @@ fn evalSubmergedBranch(
       ) * turbidSharpness * mix(0.03, 1.0, fresnelWindow);
       underSurfCol = underSurfCol + vec3<f32>(rippleGlint * 0.85, rippleGlint * 0.94, rippleGlint) * tirPlume.transmittance;
 
-      let submergeGate = 1.0 - smoothstep(-0.0045, -0.0005, camRelY);
+      let submergeGate = 1.0 - smoothstep(-0.024, 0.004, camRelY);
       let underFade = (1.0 - smoothstep(1.32, 2.75, length(pMirror.xz)))
                     * submergeGate
                     * smoothstep(0.001, 0.028, rd.y);
@@ -2663,7 +2638,8 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
 
   let camSurfH = evalSurfaceHeightOnly(ro.xz);
   let camRelY = ro.y - camSurfH;
-  let airWeight = smoothstep(-0.004, 0.004, camRelY);
+  // Smooth 50 mm optical transition zone across the meniscus so crane dives glide seamlessly from topside to sub-meniscus
+  let airWeight = smoothstep(-0.024, 0.024, camRelY);
 
   let focalDist = max(0.25, u.lensAndRheology.x);
   let cosAxis = max(dot(rd, camFwd), 0.35);
@@ -3013,7 +2989,8 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
 
   let camSurfH = evalSurfaceHeightOnly(ro.xz);
   let camRelY = ro.y - camSurfH;
-  let airWeight = smoothstep(-0.004, 0.004, camRelY);
+  // Smooth 50 mm optical transition zone across the meniscus so crane dives glide seamlessly from topside to sub-meniscus
+  let airWeight = smoothstep(-0.024, 0.024, camRelY);
 
   let focalDist = max(0.25, u.lensAndRheology.x);
   let cosAxis = max(dot(rd, camFwd), 0.35);
@@ -3024,7 +3001,7 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
   var surfBounds = vec3<f32>(0.0);
   var extBounds = vec2<f32>(0.0);
   var nonPlanarSpan = vec2<f32>(0.0);
-  if (airWeight > 0.001 && camRelY > -0.004) {
+  if (airWeight > 0.001 && camRelY > -0.025) {
     let baseY = u.surfaceParams.x;
     let tFlatCenter = select(-1.0, (baseY - ro.y) / rd.y, ro.y > baseY && rd.y < -1e-4);
     let outsideWaveDisk = tFlatCenter > 0.002 && tFlatCenter <= 12.0 && length((ro + rd * tFlatCenter).xz) > 1.66;
@@ -3120,7 +3097,7 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
     let pSurf = ro + rd * tSurf;
     let pWaveXZ = pSurf.xz;
     let dCuvRetina = cuvetteSignedDistXZ(pWaveXZ);
-    let inCuvetteTop = 1.0 - smoothstep(-0.012, 0.055, dCuvRetina);
+    let inCuvetteTop = 1.0 - smoothstep(1.75, 4.2, length(pWaveXZ));
     let sInfo = evalSurface(pWaveXZ);
     let slopeLen = length(sInfo.normal.xz) * inCuvetteTop;
     let waveSlope = smoothstep(0.00018, 0.010, slopeLen);
@@ -3146,32 +3123,30 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
       1.0,
       darkTop
     );
-    let steepDomeCurve = smoothstep(0.058, 0.18, slopeLen) * smoothstep(0.0022, 0.0085, abs(pSurf.y - u.surfaceParams.x));
+    let steepDomeCurve = smoothstep(0.085, 0.22, slopeLen) * smoothstep(0.0028, 0.0095, abs(pSurf.y - u.surfaceParams.x));
     let softboxDome = (
-      smoothstep(0.912, 0.974, nDotHSoft) * select(0.36, 0.16, darkTop) +
-      pow(nDotHSoft, 115.0) * select(0.52, 0.24, darkTop)
+      smoothstep(0.912, 0.974, nDotHSoft) * select(0.28, 0.15, darkTop) +
+      pow(nDotHSoft, 115.0) * select(0.36, 0.22, darkTop)
     ) * steepDomeCurve;
-    let capillarySheen = smoothstep(0.80, 0.982, max(nDotHWave, nDotHSoft))
-                       * select(0.24, 0.14, darkTop) * capillaryRing * mix(0.45, 1.0, waterClear);
-    let keySharpSpec = pow(nDotHWave, 155.0) * select(1.12, 0.94, darkTop) * (0.12 + 0.88 * waveSlope);
+    let topDownSpecDamp = 1.0 - smoothstep(0.42, 0.70, -rd.y);
+    let capillarySheen = smoothstep(0.84, 0.986, max(nDotHWave, nDotHSoft))
+                       * select(0.14, 0.12, darkTop) * capillaryRing * mix(0.06, 1.0, waterClear) * topDownSpecDamp;
+    let keySharpSpec = pow(nDotHWave, 165.0) * select(0.82, 0.90, darkTop) * (0.12 + 0.88 * waveSlope) * topDownSpecDamp;
     let keyBroadSpec = (
-      pow(nDotHWave, 76.0) * select(0.38, 0.36, darkTop) +
-      pow(nDotHWave, 24.0) * select(0.135, 0.22, darkTop)
-    ) * waveSlope * mix(0.35, 1.0, waterClear);
+      pow(nDotHWave, 84.0) * select(0.28, 0.35, darkTop) * topDownSpecDamp +
+      pow(nDotHWave, 32.0) * select(0.085, 0.22, darkTop) * topDownSpecDamp
+    ) * waveSlope * mix(0.04, 1.0, waterClear);
+    let topDownReliefRetina = clamp(-sInfo.lap * 9.5, -0.042, 0.042) * waveSlope * (1.0 - topDownSpecDamp) * mix(0.08, 1.0, waterClear);
     let waveSpecRetina = (
       keySharpSpec +
       keyBroadSpec +
-      softboxDome +
-      capillarySheen
+      softboxDome * topDownSpecDamp +
+      capillarySheen +
+      topDownReliefRetina
     ) * opticalDome * horizonFade;
-    // Subtle 360-deg-orbit-invariant capillary water-wall wetting meniscus glint along the rear & side borosilicate walls
-    let camFwdXZRaw = vec2<f32>(-ro.x, -ro.z);
-    let camFwdXZ = camFwdXZRaw / max(length(camFwdXZRaw), 1e-5);
-    let wallMeniscusRim = exp(-pow((dCuvRetina + 0.005) / 0.0065, 2.0)) * smoothstep(-0.15, 0.35, dot(pWaveXZ, camFwdXZ)) * opticalDome;
-    let rimAdd = wallMeniscusRim * select(0.085, 0.055, darkTop);
+    let unusedCuvDist = dCuvRetina * 0.0;
     var topSurfaceCol = finalLinear
-                      + vec3<f32>(waveSpecRetina * 0.88, waveSpecRetina * 0.94, waveSpecRetina)
-                      + vec3<f32>(rimAdd * 0.88, rimAdd * 0.95, rimAdd);
+                      + vec3<f32>(waveSpecRetina * 0.96 + unusedCuvDist, waveSpecRetina * 0.98, waveSpecRetina);
 
     // 2. Native 1:1 Retina topside water-surface reflection of aerial & pendant drops (zero grey sky-subtraction shadow disc!)
     if (u.surfaceParams.z > 0.5 && inCuvetteTop > 0.01) {
@@ -3216,49 +3191,9 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
     finalLinear = mix(finalLinear, topSurfaceCol, airWeight);
   }
 
-  // 2b. Subtle 1:1 Retina borosilicate glass cuvette vertical side edges & back rim (flush front optical window -> zero bar across plume!)
-  {
-    let cuvHalf = 0.55;
-    let yBot = u.domainBounds.y;
-    let yTopGlass = u.surfaceParams.x + 0.052;
-    let invRd = 1.0 / vec3<f32>(
-      select(rd.x, select(-1e-6, 1e-6, rd.x >= 0.0), abs(rd.x) < 1e-6),
-      select(rd.y, select(-1e-6, 1e-6, rd.y >= 0.0), abs(rd.y) < 1e-6),
-      select(rd.z, select(-1e-6, 1e-6, rd.z >= 0.0), abs(rd.z) < 1e-6)
-    );
-    let t0 = (vec3<f32>(-cuvHalf, yBot, -cuvHalf) - ro) * invRd;
-    let t1 = (vec3<f32>( cuvHalf, yTopGlass,  cuvHalf) - ro) * invRd;
-    let tMinV = min(t0, t1);
-    let tMaxV = max(t0, t1);
-    let tBoxEnter = max(max(tMinV.x, tMinV.y), tMinV.z);
-    let tBoxExit  = min(min(tMaxV.x, tMaxV.y), tMaxV.z);
-    if (tBoxExit > max(tBoxEnter, 0.02)) {
-      let darkGlassMode = u.opticalParams.w > 0.5;
-      var glassEdgeGlow = 0.0;
-      if (tBoxEnter > 0.02) {
-        let pEnter = ro + rd * tBoxEnter;
-        // Lateral screen-plane offset from central Y-axis keeps central optical port 100% clear across all 360 deg orbits!
-        let perpCenter = length(cross(vec3<f32>(0.0, pEnter.y, 0.0) - ro, rd));
-        let sidePortGate = smoothstep(0.34, 0.50, perpCenter);
-        let cornerNear = exp(-pow((abs(abs(pEnter.x) - cuvHalf) + abs(abs(pEnter.z) - cuvHalf)) / 0.011, 2.0));
-        let vertFade = smoothstep(yBot, yBot + 0.03, pEnter.y) * (1.0 - smoothstep(yTopGlass - 0.015, yTopGlass + 0.002, pEnter.y));
-        glassEdgeGlow = glassEdgeGlow + cornerNear * sidePortGate * vertFade * 0.85;
-      }
-      let pExit = ro + rd * tBoxExit;
-      let perpExit = length(cross(vec3<f32>(0.0, pExit.y, 0.0) - ro, rd));
-      let cornerFar = exp(-pow((abs(abs(pExit.x) - cuvHalf) + abs(abs(pExit.z) - cuvHalf)) / 0.013, 2.0)) * smoothstep(0.24, 0.44, perpExit);
-      let backMeniscusLine = exp(-pow((pExit.y - u.surfaceParams.x) / 0.0045, 2.0)) * smoothstep(-0.02, 0.12, camRelY);
-      let backTopLip = exp(-pow((pExit.y - yTopGlass) / 0.0040, 2.0)) * smoothstep(-0.04, 0.14, camRelY);
-      let exitVertValid = step(yBot - 0.005, pExit.y) * step(pExit.y, yTopGlass + 0.005);
-      glassEdgeGlow = glassEdgeGlow + (cornerFar * 0.55 + backMeniscusLine * 0.36 + backTopLip * 0.42) * exitVertValid;
-      let edgeScale = select(0.115, 0.075, darkGlassMode);
-      finalLinear = finalLinear + vec3<f32>(0.86, 0.94, 1.0) * (clamp(glassEdgeGlow, 0.0, 1.25) * edgeScale);
-    }
-  }
-
   // 3. Native 1:1 Retina foreground aerial & pendant drops, concave capillary wetting collars, and borosilicate capillary pipette!
   if (dropHit.hit) {
-    var dropVis = smoothstep(-0.02, 0.004, camRelY);
+    var dropVis = smoothstep(0.001, 0.018, camRelY);
     if (tSurf > 0.0 && dropHit.tEnter > tSurf) {
       dropVis = dropVis * (1.0 - smoothstep(0.0005, 0.010, dropHit.tEnter - tSurf));
     }
@@ -3267,7 +3202,7 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
       if (fgAlpha < 0.992 && u.surfaceParams.z > 1.5) {
         let backDrop = intersectAerialDropFrom(ro, rd, dropHit.tExit + 0.0015, tFocus, apRadius);
         if (backDrop.hit) {
-          var backVis = smoothstep(-0.02, 0.004, camRelY);
+          var backVis = smoothstep(0.001, 0.018, camRelY);
           if (tSurf > 0.0 && backDrop.tEnter > tSurf) {
             backVis = backVis * (1.0 - smoothstep(0.0005, 0.010, backDrop.tEnter - tSurf));
           }
@@ -3300,8 +3235,10 @@ fn fsMain(in: VertexOut) -> @location(0) vec4<f32> {
   let srgb = linearToSRGB(mapped);
   if (HDR_EXTENDED != 0u) {
     // WebGPU extended-sRGB swapchain uses IEC piecewise sRGB transfer across [0, 1] (matching SDR midtones 1:1!)
-    // while opening XDR specular headroom (> 1.0) strictly on studio strip glints above linear 0.78
-    let excess = max(finalLinear - vec3<f32>(0.78), vec3<f32>(0.0));
+    // while opening XDR specular headroom (> 1.0) strictly on achromatic studio strip glints above linear 0.78
+    // (using min-channel excess so cyan/blue sky backgrounds never receive single-channel neon-cyan EDR bloom!)
+    let excessMin = max(min(finalLinear.r, min(finalLinear.g, finalLinear.b)) - 0.78, 0.0);
+    let excess = vec3<f32>(excessMin);
     let excessPeak = max(excess.r, max(excess.g, excess.b));
     let maxHeadroom = 2.2;
     let boostPeak = (excessPeak * maxHeadroom) / (excessPeak + maxHeadroom * 1.35 + 1e-4);

@@ -309,12 +309,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  // Soft outer tank wall & thin viscous floor boundary layer (allowing RBC plumes to reach and spread on y = -0.98)
+  // Soft circular outer boundary & thin viscous floor boundary layer (preventing square box wall pooling!)
   let halfXZ = u.domainBounds.x;
   let yMin = u.domainBounds.y;
-  let wallFade = (1.0 - smoothstep(halfXZ * 0.85, halfXZ * 0.99, max(abs(pCell.x), abs(pCell.z))))
+  let rCellXZ = length(pCell.xz);
+  let wallFade = (1.0 - smoothstep(halfXZ * 0.68, halfXZ * 0.94, rCellXZ))
                * smoothstep(yMin + 0.004, yMin + 0.052, pCell.y);
-  let spongeMul = mix(0.88, 1.0, wallFade);
+  let spongeMul = mix(0.84, 1.0, wallFade);
   vx = vx * spongeMul;
   vy = vy * spongeMul;
   vz = vz * spongeMul;
@@ -484,19 +485,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mac.y = mac.y + buoyAccel * dt;
   }
 
-  // 4. Deep-column secondary baroclinic unfurling (active strictly >18 cm below meniscus so early toroidal roll-up
-  //    and upper stem stay crisp while each plume's lower skirt unfurls into unique asymmetric curtains rather than identical apples!)
+  // 4. Deep-column secondary baroclinic unfurling (active below early vortex roll-up so the upper stem
+  //    and initial torus stay crisp while settling plumes unfurl and coalesce into multi-scale curtains):
   let pCell = uvwToWorld(uvwCell, u);
   let depthBelow = u.surfaceParams.x - pCell.y;
-  let unfurlGate = smoothstep(0.18, 0.52, depthBelow) * smoothstep(0.0015, 0.018, cRbc);
+  let unfurlGate = smoothstep(0.11, 0.36, depthBelow) * smoothstep(0.0008, 0.015, cRbc + 0.45 * concCell.g);
   if (unfurlGate > 0.001) {
-    let tSwirl = u.cameraPosAndTime.w * 0.34 + u.particleParams.x * 1.7;
-    // Divergence-free horizontal streamfunction psi(x, y, z) -> v_horiz = (dpsi/dz, 0, -dpsi/dx)
+    let tSwirl = u.cameraPosAndTime.w * 0.38 + u.particleParams.x * 1.7;
+    // Divergence-free horizontal + vertical baroclinic streamfunctions -> organic tendril & curtain unfurling
     let q1 = pCell.x * 9.3 + pCell.z * 6.7 + pCell.y * 5.1 + tSwirl;
     let q2 = pCell.z * 11.1 - pCell.x * 7.9 + pCell.y * 6.3 - tSwirl * 0.77;
-    let swirlX = (6.7 * cos(q1) + 11.1 * cos(q2)) * 0.0024 * unfurlGate;
-    let swirlZ = -(9.3 * cos(q1) - 7.9 * cos(q2)) * 0.0024 * unfurlGate;
+    let q3 = pCell.x * 16.7 - pCell.z * 14.3 + pCell.y * 11.9 + tSwirl * 1.15;
+    let swirlX = ((6.7 * cos(q1) + 11.1 * cos(q2)) * 0.0038 - 14.3 * sin(q3) * 0.0018) * unfurlGate;
+    let swirlZ = (-(9.3 * cos(q1) - 7.9 * cos(q2)) * 0.0038 - 16.7 * sin(q3) * 0.0018) * unfurlGate;
+    let billowY = sin(q1 * 0.85 - q2 * 0.65) * 0.0085 * unfurlGate * smoothstep(0.18, 0.45, depthBelow);
     mac.x = mac.x + swirlX * dt;
+    mac.y = mac.y + billowY * dt;
     mac.z = mac.z + swirlZ * dt;
   }
 

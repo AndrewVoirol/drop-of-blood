@@ -95,21 +95,20 @@ export class OrbitCamera {
 
   /**
    * Evaluates smooth motion-control macro follow trajectory when in Hero Follow mode:
-   *  - t in [0, 1.12s]: Close above-water macro framing of falling drop, reflection & capillary crater impact
-   *  - t in [1.12s, 3.20s]: Smooth topside tilt & pullback framing capillary wavelets + descending vortex ring
-   *    without dipping below WATER_SURFACE_Y (eliminating 50/50 TIR ceiling mirror & keeping PIPETTE_TIP_Y in frame)
-   *  - t in [3.20s, 14.0s]: Gentle topside follow keeping both pipette orifice and deep tank plume visible
+   *  - t in [0, 1.16s]: Close above-water macro framing of falling drop, reflection & capillary crater impact
+   *  - t in [1.16s, 2.75s]: Smooth quintic submersion crane dive across the meniscus into the cylindrical beaker
+   *  - t in [2.75s, 14.0s]: Gentle submerged macro follow centering the toroidal vortex ring, stem & underside ripple mirror
    */
   public syncHeroFollow(simTime: number, instant = false): void {
     if (!this.followHeroEnabled) return;
-    const followPlume = quinticSmoothstep(1.12, 3.20, simTime);
-    const deepTrack = quinticSmoothstep(3.20, 14.0, simTime);
+    const submerge = quinticSmoothstep(1.16, 2.75, simTime);
+    const deepTrack = quinticSmoothstep(2.75, 14.0, simTime);
 
-    const elev = 0.29 * (1.0 - followPlume) + 0.35 * followPlume + 0.015 * deepTrack;
-    const targY = 0.22 * (1.0 - followPlume) + 0.095 * followPlume - 0.020 * deepTrack;
-    const dist = 1.28 * (1.0 - followPlume) + 1.44 * followPlume + 0.05 * deepTrack;
-    const azim = 0.045 * Math.sin(Math.max(0.0, simTime - 1.12) * 0.16) * followPlume;
-    const fov = ((40 + 1.0 * followPlume) * Math.PI) / 180;
+    const elev = 0.29 * (1.0 - submerge) + (-0.175) * submerge - 0.035 * deepTrack;
+    const targY = 0.22 * (1.0 - submerge) + 0.025 * submerge - 0.145 * deepTrack;
+    const dist = 1.28 * (1.0 - submerge) + 1.26 * submerge + 0.08 * deepTrack;
+    const azim = 0.045 * Math.sin(Math.max(0.0, simTime - 1.16) * 0.16) * submerge;
+    const fov = ((40 + 1.0 * submerge) * Math.PI) / 180;
 
     this.targetAzimuth = azim;
     this.targetElevation = elev;

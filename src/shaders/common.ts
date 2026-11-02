@@ -1,5 +1,5 @@
 export const WAVE_GRID_SIZE = 256;
-export const WAVE_HALF_EXTENT = 0.70; // X, Z in [-0.70, +0.70], cell size = 0.00547 (resolving fine capillary wavelets)
+export const WAVE_HALF_EXTENT = 1.60; // X, Z in [-1.60, +1.60] (3.20 m full-canvas open meniscus horizon)
 
 export const VEL_GRID_X = 96;
 export const VEL_GRID_Y = 128;
