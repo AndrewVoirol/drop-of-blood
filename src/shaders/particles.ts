@@ -129,9 +129,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   ) + hash33(vec3<f32>(f32(gid.x), u.cameraPosAndTime.w * 60.0, seed)) * 0.032);
 
   let dropXZ = drop.posAndRadius.xz;
-  let waveUV = clamp(worldXZToWaveUV(dropXZ), vec2<f32>(0.002), vec2<f32>(0.998));
-  let craterEta = clamp(textureSampleLevel(waveIn, linSampler, waveUV, 0.0).r, -0.065, 0.025);
-  let neckTopY = u.surfaceParams.x + min(0.0, craterEta * 0.32);
 
   let theta = 6.28318530718 * r3.x;
   // Even Widnall m=4,6,8 azimuthal modes eliminate m=1 beat dipole and early 5-clump blotching
@@ -141,23 +138,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     + 0.018 * sin(8.0 * theta + seed * 0.89);
 
   let rDrop = max(drop.posAndRadius.w, 0.010);
+  let emergNorm = (drop.posAndRadius.y - u.surfaceParams.x) / max(rDrop, 0.018);
+  let nascentCoreFill = smoothstep(-0.32, 0.18, emergNorm);
   let slugWeight = smoothstep(0.26, 0.85, drop.velOscAndDrain.z);
   let wakeThin = mix(0.46, 1.0, smoothstep(0.018, 0.26, drop.velOscAndDrain.z));
   let rNeck = mix(0.013 * wakeThin, clamp(rDrop * 0.84 + 0.014, 0.020, 0.056), slugWeight) * azim;
   // Hollow-centered toroidal vortex sheet (84% annular ring + 16% continuous dome membrane overlapping innerRing)
-  // keeps heavy RBC buoyancy in the outer rolled torus while preventing pale holes across the upper umbrella cap!
+  // keeps heavy RBC buoyancy in the outer rolled torus while nascentCoreFill fills the convex plunging bottom cap on initial contact!
   let innerRing = 0.37 * slugWeight;
   let isCapVeil = slugWeight > 0.08 && r3.z < 0.16;
   let radFracAnnular = mix(innerRing, 1.0, pow(r3.y, mix(0.50, 0.44, slugWeight)));
   let radFracCap = mix(0.14 * slugWeight, max(innerRing * 1.32, 0.08), sqrt(r3.y));
-  let radFrac = select(radFracAnnular, radFracCap, isCapVeil);
+  let radFracTorus = select(radFracAnnular, radFracCap, isCapVeil);
+  let radFrac = mix(radFracTorus, sqrt(r3.y), nascentCoreFill * 0.82);
   let r = rNeck * radFrac;
   let wakeDriftAngle = u.cameraPosAndTime.w * 1.85 + seed * 3.17;
   let wakeDriftXZ = vec2<f32>(cos(wakeDriftAngle), sin(wakeDriftAngle * 0.83 + seed))
                   * (0.0038 * (1.0 - slugWeight) * (1.0 - wakeThin * 0.45));
   let posXZ = dropXZ + wakeDriftXZ + vec2<f32>(cos(theta), sin(theta)) * r;
+
+  // Sample live depressed crater contour at each parcel's true posXZ so zero central parcels get sliced above hWaveLocal(posXZ)
+  let waveUV = clamp(worldXZToWaveUV(posXZ), vec2<f32>(0.002), vec2<f32>(0.998));
+  let localEta = clamp(textureSampleLevel(waveIn, linSampler, waveUV, 0.0).r, -0.085, 0.015);
+  let neckTopY = u.surfaceParams.x + min(0.0, localEta) - 0.0038;
+  let cavitySag = (1.0 - radFrac * radFrac) * (0.0085 * slugWeight + 0.0045 * nascentCoreFill);
   let zStrat = select((r3.z - 0.16 * slugWeight) / max(1.0 - 0.16 * slugWeight, 0.5), r3.z * 3.6, isCapVeil);
-  let posY = neckTopY - mix(0.0012, 0.013, clamp(zStrat, 0.0, 1.0));
+  let posY = neckTopY - cavitySag - mix(0.0014, 0.0135, clamp(zStrat, 0.0, 1.0));
 
   // Outer water-sheared contact perimeter AND smaller satellite droplets start with higher osmotic pre-swelling
   // so small drops and outer veils disperse rapidly into soft diffusing clouds while large drops penetrate deeper
@@ -192,7 +198,7 @@ ${PARCEL_STRUCT_WGSL}
 @group(0) @binding(5) var<storage, read_write> splatIntact: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> splatLysed: array<atomic<u32>>;
 
-fn sampleVelWorld(p: vec3<f32>, rouleauxMaturity: f32) -> vec3<f32> {
+fn sampleVelWorld(p: vec3<f32>, rouleauxMaturity: f32, meniscusHold: f32) -> vec3<f32> {
   let depthBelowSurf = u.surfaceParams.x - p.y;
   let uvw = clamp(worldToUVW(p, u), vec3<f32>(0.002), vec3<f32>(0.998));
   // Smooth continuous Stokes sedimentation: eliminates both the frozen 0.2mm/s top bead and the 3x 0.165m/s
@@ -201,24 +207,28 @@ fn sampleVelWorld(p: vec3<f32>, rouleauxMaturity: f32) -> vec3<f32> {
   let rouleauxFall = mix(0.020, 0.046, smoothstep(0.04, 0.42, depthBelowSurf));
   let monoSettle = rouleauxFall * settleGate;
   let stackSettle = mix(0.032, 0.062, smoothstep(0.04, 0.48, depthBelowSurf));
-  let effSettle = mix(monoSettle, stackSettle, rouleauxMaturity);
+  let surfTailHold = meniscusHold * (1.0 - smoothstep(0.003, 0.034, max(0.0, depthBelowSurf)));
+  let effSettle = mix(monoSettle, stackSettle, rouleauxMaturity) * mix(1.0, 0.035, surfTailHold);
 
-  // Sub-grid divergence-free curl unfurling active below the initial vortex roll-up (depth > 3.5 cm),
-  // opening descending rings into delicate, coalescing 3D tendrils and dispersing curtains as they settle!
-  let deepUnfurl = smoothstep(0.035, 0.22, depthBelowSurf);
+  // Strictly 3D solenoidal (k_i . d_i == 0 -> div(u_sub) == 0) multi-cm curl unfurling below initial roll-up,
+  // opening descending rings into silky curtains without compressible sine-lattice curds!
+  let deepUnfurl = smoothstep(0.035, 0.24, depthBelowSurf);
   var subGridCurl = vec3<f32>(0.0);
   if (deepUnfurl > 0.001) {
-    let tPhase = u.cameraPosAndTime.w * 0.46;
-    let a1 = p.x * 18.5 + p.z * 14.2 + p.y * 11.3 + tPhase;
-    let a2 = p.z * 21.3 - p.x * 16.7 + p.y * 13.9 - tPhase * 0.82;
-    let a3 = p.x * 31.0 + p.z * 27.0 - p.y * 23.0 + tPhase * 1.15;
-    let vxCurl = (14.2 * cos(a1) + 21.3 * cos(a2) + 27.0 * sin(a3) * 0.42) * 0.00068 * deepUnfurl;
-    let vzCurl = (-18.5 * cos(a1) + 16.7 * cos(a2) - 31.0 * sin(a3) * 0.42) * 0.00068 * deepUnfurl;
-    let vyCurl = sin(a1 * 0.75 - a2 * 0.65) * 0.0036 * deepUnfurl * smoothstep(0.08, 0.30, depthBelowSurf);
-    subGridCurl = vec3<f32>(vxCurl, vyCurl, vzCurl);
+    let tPhase = u.cameraPosAndTime.w * 0.42;
+    let a1 = 8.4 * p.x + 5.2 * p.y + 6.6 * p.z + tPhase;
+    let a2 = -7.2 * p.x + 6.0 * p.y + 9.4 * p.z - tPhase * 0.81;
+    let a3 = 11.5 * p.x - 7.5 * p.y - 8.5 * p.z + tPhase * 1.13;
+    let rawCurl = vec3<f32>(-8.16, 3.84, 7.36) * cos(a1)
+                + vec3<f32>(-8.20, -1.38, -5.40) * cos(a2)
+                + vec3<f32>(8.30, -1.10, 12.20) * (0.45 * sin(a3));
+    let vertTaper = smoothstep(0.06, 0.24, depthBelowSurf);
+    subGridCurl = vec3<f32>(rawCurl.x, rawCurl.y * vertTaper, rawCurl.z) * (0.00028 * deepUnfurl);
   }
 
-  return textureSampleLevel(velCenterIn, linSampler, uvw, 0.0).xyz + vec3<f32>(0.0, -effSettle, 0.0) + subGridCurl;
+  var vGrid = textureSampleLevel(velCenterIn, linSampler, uvw, 0.0).xyz;
+  vGrid.y = vGrid.y * mix(1.0, 0.045, surfTailHold);
+  return vGrid + vec3<f32>(0.0, -effSettle, 0.0) + subGridCurl;
 }
 
 fn splatTrilinearIntact(uvw: vec3<f32>, mass: f32) {
@@ -312,16 +322,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var lysis = clamp(rawW - ageTicks, 0.0, 0.98);
   let parcelAge = ageTicks * (1.0 / 240.0);
   let rouleauxMaturity = smoothstep(8.5, 18.0, parcelAge);
+  let tailRank = fract(f32(gid.x) * 0.7548776662);
+  let meniscusHold = pow(smoothstep(0.36, 0.995, tailRank), 1.65)
+                   * (1.0 - smoothstep(5.2, 10.2, parcelAge));
 
   // 1. 3rd-order Ralston RK3 advection (RK2 midpoint below 5 cm/s where displacement < 0.04 voxels -> < 0.3 um delta)
-  let v1 = sampleVelWorld(pos, rouleauxMaturity);
+  let v1 = sampleVelWorld(pos, rouleauxMaturity, meniscusHold);
   let speed2 = dot(v1, v1);
   if (dt > 0.0) {
     ageTicks = min(8191.0, ageTicks + max(1.0, round(dt * 240.0)));
-    let v2 = sampleVelWorld(pos + 0.5 * v1 * dt, rouleauxMaturity);
+    let v2 = sampleVelWorld(pos + 0.5 * v1 * dt, rouleauxMaturity, meniscusHold);
     var vAdv = v2;
     if (speed2 > 0.0025) {
-      let v3 = sampleVelWorld(pos + 0.75 * v2 * dt, rouleauxMaturity);
+      let v3 = sampleVelWorld(pos + 0.75 * v2 * dt, rouleauxMaturity, meniscusHold);
       vAdv = (2.0 / 9.0) * v1 + (3.0 / 9.0) * v2 + (4.0 / 9.0) * v3;
     }
     // Viscous floor contact damping + radial outward boundary-layer cushion glide on y = -0.98
@@ -338,19 +351,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // 2. Symmetric 2nd-order material line-element evolution ds/dt = (s . nabla) u up to 5.4 voxels:
     //    Active down to 1.4 mm/s (speed2 > 2.0e-6) so all upper-stem wake parcels stretch into continuous threads!
-    if (speed2 > 2.0e-6 && floorSlip > 0.15) {
+    if (speed2 > 2.5e-7 && floorSlip > 0.15) {
       let sLen = max(length(stretch), 1e-5);
       let sDir = stretch / sLen;
       let probeStep = 0.0065;
-      let vPlus  = sampleVelWorld(pos + sDir * probeStep, rouleauxMaturity);
-      let vMinus = sampleVelWorld(pos - sDir * probeStep, rouleauxMaturity);
+      let vPlus  = sampleVelWorld(pos + sDir * probeStep, rouleauxMaturity, meniscusHold);
+      let vMinus = sampleVelWorld(pos - sDir * probeStep, rouleauxMaturity, meniscusHold);
       let dVelAlongS = (vPlus - vMinus) * (sLen / (2.0 * probeStep));
       stretch = stretch + dVelAlongS * dt;
       let vMag = sqrt(speed2);
-      if (vMag > 0.003 && sLen < 0.006) {
+      if (vMag > 0.001 && sLen < 0.006) {
         stretch = stretch + (v1 / vMag) * (0.0022 * dt);
       }
-      let nextLen = clamp(length(stretch), 0.0026, 0.0270);
+      let maxThreadLen = mix(0.0270, 0.0420, meniscusHold * (1.0 - smoothstep(0.005, 0.065, max(0.0, u.surfaceParams.x - pos.y))));
+      let nextLen = clamp(length(stretch), 0.0026, maxThreadLen);
       stretch = (stretch / max(length(stretch), 1e-5)) * nextLen;
     } else if (floorSlip <= 0.15) {
       stretch.y = stretch.y * exp(-dt * 5.0);
@@ -392,7 +406,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cNeighborhood = cSample.r + cSample.g;
   let diluteExposure = 1.0 - smoothstep(0.012, 0.22, cNeighborhood);
   let ageDispersion = smoothstep(1.1, 7.8, parcelAge + diluteExposure * 2.2 + lysis * 2.5);
-  let minIntactMass = ${INITIAL_PARCEL_VOXEL_MASS.toFixed(5)} * mix(mix(0.46, 0.64, cellRes), mix(0.07, 0.20, cellRes), ageDispersion);
+  let lateDiluteFade = smoothstep(7.2, 16.0, parcelAge) * diluteExposure;
+  let midResid = mix(0.07, 0.20, cellRes);
+  let lateResid = mix(0.014, 0.052, cellRes);
+  let minIntactMass = ${INITIAL_PARCEL_VOXEL_MASS.toFixed(5)} * mix(mix(0.46, 0.64, cellRes), mix(midResid, lateResid, lateDiluteFade), ageDispersion);
   let lysableHeadroom = mass - minIntactMass;
   let floorShelter = smoothstep(yMin + 0.024, yMin + 0.062, pos.y);
   if (dt > 0.0 && lysableHeadroom > 1e-7 && floorShelter > 0.02) {

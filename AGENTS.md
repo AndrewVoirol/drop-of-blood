@@ -4,7 +4,7 @@
 
 1. **Mandatory Turn-0 Skill Read**: Read `/Users/andrewvoirol/.gemini/config/skills/webgpu-interactive-simulation/SKILL.md` before designing, editing, or delegating any shader, fluid, camera, or verification work.
 2. **Core Commands**:
-   - **Unit Tests (`46/46`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
+   - **Unit Tests (`48/48`)**: `npx vitest run` (or `npm run test:blast -- <file-or-symbol>`)
    - **Static WGSL AST, Struct Alignment & Control-Flow Lint**: `npm run lint:wgsl`
    - **Symbol Line-Number Indexer (Before Reading Monoliths)**: `npm run map:symbols -- <keyword>`
    - **Typecheck + Production Bundle (`TS 7` + `Vite 8` Rolldown)**: `npm run build`
@@ -24,7 +24,7 @@
 - **Quiescent Meniscus (`WATER_SURFACE_Y`)**: `y = +0.30` ([`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts#L5), [`src/sim/uniformLayout.ts`](src/sim/uniformLayout.ts#L11)).
 - **Pasteur Pipette Orifice (`PIPETTE_TIP_Y`)**: `y = +0.55` ([`src/sim/dropKinematics.ts`](src/sim/dropKinematics.ts#L306-L364)).
 - **Tank Floor**: `y = -0.98` (3D MAC fluid box spans `x, z in [-0.48, +0.48]`, `y in [-0.98, +0.30]`, resolution `192 × 256 × 192`, voxel size `~5.0 mm`).
-- **2D Free-Surface Capillary–Gravity Wave Grid**: `WAVE_GRID_SIZE = 256`, `WAVE_HALF_EXTENT = 1.65` ([`src/shaders/common.ts`](src/shaders/common.ts#L1-L2)), spanning `[-1.65, +1.65]` (`3.30 m` full-canvas span, radial absorber `WAVE_SPONGE_INNER = 1.188`, `WAVE_SPONGE_OUTER = 1.617`), so ripples propagate seamlessly across the entire open water surface without a visible container wall.
+- **2D Free-Surface Capillary–Gravity Wave Grid**: `WAVE_GRID_SIZE = 512`, `WAVE_HALF_EXTENT = 1.60` ([`src/shaders/common.ts`](src/shaders/common.ts#L1-L2)), spanning `[-1.60, +1.60]` (`3.20 m` full-canvas span, $\Delta x = 6.25\text{ mm}$, radial Rayleigh absorber beyond `r > 0.90 m`), resolving dispersive capillary precursor wavelets (`12.5–30 mm`) across the entire open water surface without container-wall echoes.
 - **Dual Clocks**:
   - Physics substep: `FIXED_SIM_DT = 1 / 60` ([`src/engine/BloodDropEngine.ts`](src/engine/BloodDropEngine.ts#L82)) representing `1000 fps` slow-motion simulation seconds.
   - User pointer hold (`PENDANT_HOLD_DELAY_MS = 160 ms` in [`src/main.ts`](src/main.ts#L65)): measured in real wall-clock seconds (`0..2.2 s` -> $V \propto t$).
@@ -33,7 +33,7 @@
 ### B. User HUD `CAMERA_PRESETS` (`src/math/camera.ts` lines `14–42` & `102–125`)
 Every visual change MUST be verified through these actual user presets, never solely through custom `window.__QA__.setCam(...)` overrides:
 1. **`hero` (`Follow Shot`, default on boot)**:
-   - Stays strictly topside (`camPos.y > +0.54 > WATER_SURFACE_Y = +0.30`) across all timestamps (`elev = +0.29 -> +0.365`, `dist = 1.28 -> 1.49`, `target.y = +0.22 -> +0.075`, `fovY = 40° -> 41°`), tilting down to follow the descending vortex ring through the cuvette without diving into a 50/50 TIR ceiling mirror split and keeping `PIPETTE_TIP_Y = +0.55` inside the frustum (`|ndcY| <= 0.95`) on subsequent holds.
+   - Starts topside (`camPos.y > +0.54 > WATER_SURFACE_Y = +0.30` across `t in [0, 1.16 s]`) framing `PIPETTE_TIP_Y = +0.55` (`|ndcY| <= 0.95`), cranes smoothly below the meniscus (`elev = -0.175 -> -0.21`) across `t in [1.16, 2.75 s]` to follow the descending vortex ring & underside ripples, and smoothly cranes back topside (`heroTopsideCue -> 1`) whenever a subsequent pendant or aerial drop is triggered above water.
 2. **`crown` (`Surface Crown`)**:
    - `az = 0.32`, `elev = +0.44`, `dist = 1.48`, `target = [0, 0.11, 0]`, `fovY = 40°` — frames both the entire capillary wave field and `PIPETTE_TIP_Y = +0.55` (`tipNdcY ≈ +0.846`).
 3. **`abyss` (`Sub-Meniscus`)**:
@@ -79,3 +79,7 @@ Every visual change MUST be verified through these actual user presets, never so
 4. **Topside `Follow` Trajectory & Wave-Warped `Sub-Meniscus` TIR ([`src/math/camera.ts`](src/math/camera.ts), [`src/shaders/render.ts`](src/shaders/render.ts))**:
    - Never auto-dive `syncHeroFollow` barely below `y = +0.30` into a grazing 50/50 TIR ceiling clone.
    - In `Sub-Meniscus` (`abyss`), keep `rPupil` at macro lens scale (`3.5–7.8 mm`) with un-crushed wave slopes and folded water-path attenuation (`tirFoldedAtten`) so underside reflections ripple and soften naturally rather than cloning the plume 1:1.
+5. **Zero-Downside Macro Inspection (`override MACRO_INSPECT_MODE`, `0.24 m` Zoom, 3D Pan, Focus & Paused `16×` SSAA)**:
+   - Keep `pRender` (`MACRO_INSPECT_MODE = 0`) strictly on the `160`-step baseline during live unpaused preset playback (`distance >= 1.08 m`); switch to `pRenderMacro` / `pRenderAccum` (`MACRO_INSPECT_MODE = 1`) only when paused or zoomed inside `< 1.08 m`.
+   - Preserve exact legacy `apertureRadius` (`macroStopScale === 1.0`) at `focalDistance >= 0.82 m` while stopping down proportionally across `[0.24, 0.82) m` (`src/sim/uniformLayout.ts`).
+   - Derive `studioBackDir` / `chiaroRimDir` from horizontal view forward (`horizAim` in `lighting.ts` & `render.ts`), lock stationary paused `PausedConvergedEncoder` `frameIndex` to `pausedBaseFrame + PAUSED_ACCUM_TARGET - 1` (`0` LSB dither flip after 16 samples), and track `PlumeTrackerState` instantaneously (`instant = true`) when single-stepping substeps while paused.

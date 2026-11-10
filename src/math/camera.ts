@@ -1,6 +1,12 @@
 export type Vec3 = [number, number, number];
 export type Mat4 = Float32Array; // 16 floats, column-major (WGSL standard)
 
+export const MIN_CAMERA_DISTANCE = 0.24;
+export const MAX_CAMERA_DISTANCE = 2.85;
+export const MAX_CAMERA_TARGET_XZ = 0.42;
+export const MIN_CAMERA_TARGET_Y = -0.92;
+export const MAX_CAMERA_TARGET_Y = 0.52;
+
 export interface CameraPreset {
   id: 'hero' | 'crown' | 'abyss';
   label: string;
@@ -98,11 +104,14 @@ export class OrbitCamera {
    *  - t in [0, 1.16s]: Close above-water macro framing of falling drop, reflection & capillary crater impact
    *  - t in [1.16s, 2.75s]: Smooth quintic submersion crane dive across the meniscus into the cylindrical beaker
    *  - t in [2.75s, 14.0s]: Gentle submerged macro follow centering the toroidal vortex ring, stem & underside ripple mirror
+   *  - topsideCue in [0, 1]: When a subsequent pendant/aerial drop is spawned above water, smoothly cranes back topside
+   *    so the pipette, drop, and meniscus entry remain visible before gliding back underwater!
    */
-  public syncHeroFollow(simTime: number, instant = false): void {
+  public syncHeroFollow(simTime: number, instant = false, topsideCue = 0.0): void {
     if (!this.followHeroEnabled) return;
-    const submerge = quinticSmoothstep(1.16, 2.75, simTime);
-    const deepTrack = quinticSmoothstep(2.75, 14.0, simTime);
+    const cue = clamp(topsideCue, 0.0, 1.0);
+    const submerge = quinticSmoothstep(1.16, 2.75, simTime) * (1.0 - cue);
+    const deepTrack = quinticSmoothstep(2.75, 14.0, simTime) * (1.0 - cue);
 
     const elev = 0.29 * (1.0 - submerge) + (-0.175) * submerge - 0.035 * deepTrack;
     const targY = 0.22 * (1.0 - submerge) + 0.025 * submerge - 0.145 * deepTrack;
@@ -145,16 +154,74 @@ export class OrbitCamera {
 
   public dolly(factor: number): void {
     this.followHeroEnabled = false;
-    this.targetDistance = clamp(this.targetDistance * factor, 0.82, 2.85);
+    this.targetDistance = clamp(
+      this.targetDistance * factor,
+      MIN_CAMERA_DISTANCE,
+      MAX_CAMERA_DISTANCE
+    );
     const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
     this.targetElevation = Math.max(this.targetElevation, minEl);
   }
 
   public panVertical(deltaY: number): void {
     this.followHeroEnabled = false;
-    this.targetCenter[1] = clamp(this.targetCenter[1] + deltaY, -0.65, 0.35);
+    this.targetCenter[1] = clamp(
+      this.targetCenter[1] + deltaY,
+      MIN_CAMERA_TARGET_Y,
+      MAX_CAMERA_TARGET_Y
+    );
     const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
     this.targetElevation = Math.max(this.targetElevation, minEl);
+  }
+
+  /**
+   * 1:1 cursor-locked 3D camera-plane pan across all zoom levels (scaled by distance * tan(fovY / 2)).
+   * `deltaRightNorm` and `deltaUpNorm` are normalized by viewport height (dx / height, dy / height).
+   */
+  public panScreen(deltaRightNorm: number, deltaUpNorm: number): void {
+    this.followHeroEnabled = false;
+    const worldSpanY = 2.0 * this.targetDistance * Math.tan(this.targetFovY * 0.5);
+    const sinAz = Math.sin(this.targetAzimuth);
+    const cosAz = Math.cos(this.targetAzimuth);
+    const sinEl = Math.sin(this.targetElevation);
+    const cosEl = Math.cos(this.targetElevation);
+
+    // Camera right = [cosAz, 0, -sinAz]; camera up = [-sinEl * sinAz, cosEl, -sinEl * cosAz]
+    const moveRight = -deltaRightNorm * worldSpanY;
+    const moveUp = deltaUpNorm * worldSpanY;
+
+    const nextX = this.targetCenter[0] + moveRight * cosAz - moveUp * sinEl * sinAz;
+    const nextY = this.targetCenter[1] + moveUp * cosEl;
+    const nextZ = this.targetCenter[2] - moveRight * sinAz - moveUp * sinEl * cosAz;
+
+    this.targetCenter[0] = clamp(nextX, -MAX_CAMERA_TARGET_XZ, MAX_CAMERA_TARGET_XZ);
+    this.targetCenter[1] = clamp(nextY, MIN_CAMERA_TARGET_Y, MAX_CAMERA_TARGET_Y);
+    this.targetCenter[2] = clamp(nextZ, -MAX_CAMERA_TARGET_XZ, MAX_CAMERA_TARGET_XZ);
+
+    const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
+    this.targetElevation = Math.max(this.targetElevation, minEl);
+  }
+
+  /**
+   * Centers the orbit and thin-lens focal pivot on `point` without pushing the user out if already zoomed closer.
+   */
+  public focusOn(point: Vec3, maxInspectDistance?: number, instant = false): void {
+    this.followHeroEnabled = false;
+    this.targetCenter[0] = clamp(point[0], -MAX_CAMERA_TARGET_XZ, MAX_CAMERA_TARGET_XZ);
+    this.targetCenter[1] = clamp(point[1], MIN_CAMERA_TARGET_Y, MAX_CAMERA_TARGET_Y);
+    this.targetCenter[2] = clamp(point[2], -MAX_CAMERA_TARGET_XZ, MAX_CAMERA_TARGET_XZ);
+    if (maxInspectDistance !== undefined && this.targetDistance > maxInspectDistance) {
+      this.targetDistance = clamp(maxInspectDistance, MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
+    }
+    const minEl = this.minElevationForTarget(this.targetCenter[1], this.targetDistance);
+    this.targetElevation = Math.max(this.targetElevation, minEl);
+    if (instant) {
+      this.target[0] = this.targetCenter[0];
+      this.target[1] = this.targetCenter[1];
+      this.target[2] = this.targetCenter[2];
+      this.distance = this.targetDistance;
+      this.elevation = Math.max(this.elevation, minEl);
+    }
   }
 
   public tick(dtRealSec: number, aspect: number): void {
@@ -182,7 +249,7 @@ export class OrbitCamera {
     this.position[2] = this.target[2] + this.distance * cosEl * Math.cos(this.azimuth);
 
     mat4LookAt(this.viewMatrix, this.position, this.target, [0, 1, 0]);
-    mat4PerspectiveZO(this.projMatrix, this.fovY, safeAspect, 0.08, 12.0);
+    mat4PerspectiveZO(this.projMatrix, this.fovY, safeAspect, 0.025, 12.0);
     mat4Multiply(this.viewProjMatrix, this.projMatrix, this.viewMatrix);
     mat4Invert(this.invViewProjMatrix, this.viewProjMatrix);
   }

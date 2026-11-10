@@ -121,12 +121,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let keyLight = caustic * exp(-tauKey * keyShadowScale);
 
-  // 2. View-Coupled Backlight Softbox (Studio mode) vs Opposing Grazing Rim Beam (Dark-Field Chiaroscuro)
+  // 2. View-Coupled Backlight Softbox (Studio mode) vs Opposing Grazing Rim Beam (Dark-Field Chiaroscuro):
+  //    Derive horizontal aim from camera forward vector so backlighting stays aligned behind off-center
+  //    panned drops and elevation-invariant under 0.24 m macro zoom (matching centered presets 1:1).
   let camPos = u.cameraPosAndTime.xyz;
-  let toOrigin = vec3<f32>(0.0, -0.05, 0.0) - camPos;
-  let camRightXZ = normalize(vec2<f32>(-toOrigin.z, toOrigin.x) + vec2<f32>(1e-6, 0.0));
-  let studioBackDir = normalize(vec3<f32>(toOrigin.x, 0.22, toOrigin.z));
-  let chiaroRimDir  = normalize(vec3<f32>(-0.78 * camRightXZ.x + 0.38 * toOrigin.x, 0.24, -0.78 * camRightXZ.y + 0.38 * toOrigin.z));
+  let pAim4 = u.invViewProj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
+  let camFwd3 = normalize(pAim4.xyz / pAim4.w - camPos);
+  let aimXZLen = length(camFwd3.xz);
+  let unitAimXZ = select(vec2<f32>(0.0, -1.0), camFwd3.xz / aimXZLen, aimXZLen > 1e-4);
+  let horizAim = unitAimXZ * 1.24;
+  let camRightXZ = vec2<f32>(-unitAimXZ.y, unitAimXZ.x);
+  let studioBackDir = normalize(vec3<f32>(horizAim.x, 0.22, horizAim.y));
+  let chiaroRimDir  = normalize(vec3<f32>(-0.78 * camRightXZ.x + 0.38 * horizAim.x, 0.24, -0.78 * camRightXZ.y + 0.38 * horizAim.y));
   let backDir = select(studioBackDir, chiaroRimDir, darkMode);
 
   let backShadowScale = select(23.0, 42.0, darkMode) * u.opticalParams.x;

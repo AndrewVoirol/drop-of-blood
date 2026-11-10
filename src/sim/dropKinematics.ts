@@ -129,6 +129,23 @@ export interface DropSlotState {
   seed: number;
 }
 
+export interface PlumeTrackerState {
+  id: number;
+  active: boolean;
+  x: number;
+  y: number;
+  z: number;
+  spawnSimTime: number;
+  impactRadius: number;
+}
+
+export interface InspectionSubject {
+  id: number;
+  kind: 'drop' | 'plume';
+  center: [number, number, number];
+  radius: number;
+}
+
 export interface MultiDropSnapshot {
   simTime: number;
   activeCount: number;
@@ -186,10 +203,21 @@ export class MultiDropSystem {
   public readonly slots: DropSlotState[] = Array.from({ length: MAX_ACTIVE_DROPS }, () =>
     createEmptySlot()
   );
+  public readonly plumes: PlumeTrackerState[] = Array.from({ length: MAX_ACTIVE_DROPS }, () => ({
+    id: 0,
+    active: false,
+    x: 0.0,
+    y: WATER_SURFACE_Y - 0.015,
+    z: 0.0,
+    spawnSimTime: 0.0,
+    impactRadius: INITIAL_DROP_RADIUS,
+  }));
   public simTime = 0.0;
   public lastSpawnSimTime = 0.0;
   private pendantSlotIndex = -1;
   private pendingRecycledVolume = 0.0;
+  private nextPlumeId = 1;
+  private plumeRingCursor = 0;
 
   private readonly snapshotObj: MultiDropSnapshot = {
     simTime: 0.0,
@@ -246,12 +274,81 @@ export class MultiDropSystem {
     this.lastSpawnSimTime = 0.0;
     this.pendantSlotIndex = -1;
     this.pendingRecycledVolume = 0.0;
+    this.nextPlumeId = 1;
+    this.plumeRingCursor = 0;
     for (let i = 0; i < MAX_ACTIVE_DROPS; i++) {
       this.clearSlot(this.slots[i]);
+      this.plumes[i].active = false;
     }
     const hero = this.spawnAerialDrop(offsetXZ, INITIAL_DROP_RADIUS, seed, Y_START, V_START);
     hero.pipettePresence = 1.0;
     return this.buildSnapshot(0.0);
+  }
+
+  private registerPlumeImpact(x: number, z: number, impactRadius: number, impactSimTime: number): void {
+    const p = this.plumes[this.plumeRingCursor];
+    this.plumeRingCursor = (this.plumeRingCursor + 1) % MAX_ACTIVE_DROPS;
+    p.id = 1000 + this.nextPlumeId++;
+    p.active = true;
+    p.x = x;
+    p.y = WATER_SURFACE_Y - 0.015;
+    p.z = z;
+    p.spawnSimTime = impactSimTime;
+    p.impactRadius = impactRadius;
+  }
+
+  private updatePlumeTrackers(): void {
+    for (let i = 0; i < MAX_ACTIVE_DROPS; i++) {
+      const p = this.plumes[i];
+      if (!p.active) continue;
+      const age = Math.max(0.0, this.simTime - p.spawnSimTime);
+      if (age > 34.0) {
+        p.active = false;
+        continue;
+      }
+      const sizeScale = clamp(p.impactRadius / INITIAL_DROP_RADIUS, 0.65, 1.45);
+      p.y = clamp(
+        0.285 - ((0.108 * sizeScale) * age) / (1.0 + 0.08 * age) - 0.016 * age,
+        -0.88,
+        WATER_SURFACE_Y
+      );
+    }
+  }
+
+  /**
+   * Returns active inspection targets (pendant/aerial/coalescing drops + descending submerged vortex rings),
+   * ordered newest-first so pressing Focus (`F`) targets the freshest active feature and cycles cleanly.
+   */
+  public getInspectionSubjects(): InspectionSubject[] {
+    const out: InspectionSubject[] = [];
+    for (let i = 0; i < MAX_ACTIVE_DROPS; i++) {
+      const s = this.slots[i];
+      if (!s.active) continue;
+      // Only include coalescing drops during early crater stage; once deeply drained, the submerged plume tracker takes over seamlessly
+      if (s.mode === 'coalescing' && s.ageInPhase > 0.36) continue;
+      out.push({
+        id: Math.round(Math.abs(s.seed) * 100000) + i + 1,
+        kind: 'drop',
+        center: [s.center[0], s.center[1], s.center[2]],
+        radius: Math.max(0.018, s.radius),
+      });
+    }
+
+    const activePlumes: PlumeTrackerState[] = [];
+    for (let i = 0; i < MAX_ACTIVE_DROPS; i++) {
+      const p = this.plumes[i];
+      if (p.active) activePlumes.push(p);
+    }
+    activePlumes.sort((a, b) => b.spawnSimTime - a.spawnSimTime);
+    for (const p of activePlumes) {
+      out.push({
+        id: p.id,
+        kind: 'plume',
+        center: [p.x, p.y, p.z],
+        radius: Math.max(0.035, p.impactRadius * 1.35),
+      });
+    }
+    return out;
   }
 
   public spawnAerialDrop(
@@ -617,6 +714,7 @@ export class MultiDropSystem {
           s.oscillation = oscContact;
           s.oscAtContact = oscContact;
           s.pipettePresence = 0.0;
+          this.registerPlumeImpact(s.center[0], s.center[2], r0, this.simTime - (safeDt - dtAir));
 
           const dtSub = safeDt - dtAir;
           this.advanceCoalescingSlot(s, dtSub);
@@ -646,6 +744,7 @@ export class MultiDropSystem {
       this.pendingRecycledVolume = 0.0;
     }
 
+    this.updatePlumeTrackers();
     return this.buildSnapshot(totalStepDrained);
   }
 

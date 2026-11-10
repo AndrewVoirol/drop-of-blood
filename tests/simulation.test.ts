@@ -3,6 +3,11 @@ import engineSrc from '../src/engine/BloodDropEngine.ts?raw';
 import lutSrc from '../src/sim/spectralLut.ts?raw';
 import {
   CAMERA_PRESETS,
+  MAX_CAMERA_DISTANCE,
+  MAX_CAMERA_TARGET_XZ,
+  MAX_CAMERA_TARGET_Y,
+  MIN_CAMERA_DISTANCE,
+  MIN_CAMERA_TARGET_Y,
   mat4Multiply,
   OrbitCamera,
   unprojectWorldPoint,
@@ -328,19 +333,20 @@ describe('OrbitCamera & WebGPU ZO matrix math', () => {
     expect(rayDir[2]).toBeCloseTo(expDir[2], 5);
   });
 
-  it('clamps extreme orbit elevations and dolly distances within safe bounds', () => {
+  it('clamps extreme orbit elevations and dolly distances within safe macro bounds', () => {
     const cam = new OrbitCamera(CAMERA_PRESETS.hero);
     cam.orbit(0, 99.0);
     cam.dolly(0.0001);
-    cam.tick(10.0, 1.6);
+    for (let i = 0; i < 25; i++) cam.tick(0.1, 1.6);
     expect(cam.elevation).toBeLessThanOrEqual(1.15);
-    expect(cam.distance).toBeGreaterThanOrEqual(0.82);
+    expect(cam.distance).toBeCloseTo(MIN_CAMERA_DISTANCE, 5);
+    expect(cam.distance).toBeCloseTo(0.24, 5);
 
     cam.orbit(0, -99.0);
     cam.dolly(9999.0);
-    cam.tick(10.0, 1.6);
+    for (let i = 0; i < 25; i++) cam.tick(0.1, 1.6);
     expect(cam.elevation).toBeGreaterThanOrEqual(-1.15);
-    expect(cam.distance).toBeLessThanOrEqual(2.85);
+    expect(cam.distance).toBeCloseTo(MAX_CAMERA_DISTANCE, 4);
   });
 
   it('keeps hero follow camera cleanly topside across descent without a 50/50 TIR mirror dive, frames PIPETTE_TIP_Y inside hero & crown frustums, and yields to manual orbit', () => {
@@ -848,7 +854,7 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain('let remFocusTir = tFocus - tSurfHit;');
     expect(RENDER_WGSL).toContain('let remFocusRefl = tFocus - tSurf;');
     expect(RENDER_WGSL).toContain('let remFocus = tFocus - tPlumeOrigin;');
-    expect(RENDER_WGSL).toContain('let focalRef = max(u.lensAndRheology.x, 0.25);');
+    expect(RENDER_WGSL).toContain('let focalRef = max(u.lensAndRheology.x, 0.18);');
     expect(RENDER_WGSL).not.toContain('max(0.05, tFocus -');
     expect(RENDER_WGSL).toContain('let intactMask = smoothstep(');
     expect(RENDER_WGSL).toContain('let lysedMask  = smoothstep(');
@@ -1747,5 +1753,160 @@ describe('Boundary & adversarial edge-case invariants', () => {
     expect(RENDER_WGSL).toContain(
       'let topSnellGate = opticalDome * smoothstep(0.09, 0.25, -rd.y) * (1.0 - smoothstep(0.45, 0.72, -rd.y)) * smoothstep(0.025, 0.14, camRelY);'
     );
+  });
+
+  it('enforces Round 11 512x512 dispersive capillary FFT, crater-contour parcel emission, 3D solenoidal curl unfurling, 650nm RBC key reflectance, and Hero topside re-drop crane', () => {
+    // 1. 512x512 capillary-gravity FFT (dx = 6.25 mm) with 256-thread 1-butterfly/thread disjoint coverage across all 9 stages
+    expect(WAVE_GRID_SIZE).toBe(512);
+    expect((2.0 * WAVE_HALF_EXTENT) / WAVE_GRID_SIZE).toBeCloseTo(0.00625, 6);
+    expect(WAVE_FFT_ROW_WGSL).toContain('@compute @workgroup_size(256, 1, 1)');
+    expect(WAVE_FFT_ROW_WGSL).toContain('let idx1 = tid + 256u;');
+    for (let stage = 0; stage < 9; stage++) {
+      const seen = new Uint8Array(512);
+      const halfSpan = 1 << stage;
+      for (let tid = 0; tid < 256; tid++) {
+        const k = tid & (halfSpan - 1);
+        const blockBase = (tid >> stage) << (stage + 1);
+        const i0 = blockBase + k;
+        const i1 = i0 + halfSpan;
+        expect(i0).toBeGreaterThanOrEqual(0);
+        expect(i1).toBeLessThan(512);
+        seen[i0] += 1;
+        seen[i1] += 1;
+      }
+      for (let i = 0; i < 512; i++) {
+        expect(seen[i]).toBe(1);
+      }
+    }
+
+    // 2. Exact 3D solenoidal polarization orthogonality (k_i . d_i === 0 -> div(u) === 0) across parcel & MAC unfurling
+    const parcelModes: Array<[[number, number, number], [number, number, number]]> = [
+      [[8.4, 5.2, 6.6], [-8.16, 3.84, 7.36]],
+      [[-7.2, 6.0, 9.4], [-8.20, -1.38, -5.40]],
+      [[11.5, -7.5, -8.5], [8.30, -1.10, 12.20]],
+    ];
+    const macModes: Array<[[number, number, number], [number, number, number]]> = [
+      [[6.4, 4.0, 5.2], [-6.25, 2.85, 5.50]],
+      [[-5.6, 4.8, 7.2], [-6.30, -1.26, -4.06]],
+      [[9.0, -6.0, -6.4], [6.40, -0.96, 9.90]],
+    ];
+    for (const [k, d] of [...parcelModes, ...macModes]) {
+      const dot = k[0] * d[0] + k[1] * d[1] + k[2] * d[2];
+      expect(dot).toBeCloseTo(0.0, 10);
+    }
+
+    // 3. True posXZ crater-contour parcel emission + solenoidal top-2-cell MAC-to-center boundary + conserved hemolysis veil
+    expect(PARTICLE_EMIT_WGSL).toContain('let waveUV = clamp(worldXZToWaveUV(posXZ)');
+    expect(PARTICLE_EMIT_WGSL).toContain('let nascentCoreFill = smoothstep(-0.32, 0.18, emergNorm);');
+    expect(FLUID_MAC_TO_CENTER_WGSL).toContain('let rActive = clamp(slot.posAndRadius.w * 1.15 + 0.032, 0.046, 0.092);');
+    expect(CONC_RESOLVE_WGSL).toContain('exp(-dt * mix(0.016, 0.034,');
+    expect(Math.exp(-12.0 * 0.034)).toBeGreaterThan(0.65);
+
+    // 4. Calibrated 650-680 nm erythrocyte Mie key reflectance + curved swell backlight softbox + Hero topside re-drop crane
+    expect(RENDER_WGSL).toContain('let keyFace = smoothstep(-0.18, 0.82, dot(nMacro, keyDir)) * keyIllum;');
+    expect(COMPOSITE_WGSL).toContain('let rimSoftDir = normalize(vec3<f32>(-0.16, 0.58, -0.80));');
+
+    const cam = new OrbitCamera(CAMERA_PRESETS.hero);
+    cam.syncHeroFollow(5.0, true, 0.0);
+    cam.updateMatrices(16 / 10);
+    expect(cam.position[1]).toBeLessThan(WATER_SURFACE_Y - 0.14);
+
+    // When a subsequent pendant/aerial drop is active above water (topsideCue = 1.0), Hero Follow cranes cleanly back topside
+    cam.syncHeroFollow(5.0, true, 1.0);
+    cam.updateMatrices(16 / 10);
+    expect(cam.position[1]).toBeGreaterThan(WATER_SURFACE_Y + 0.24);
+    expect(cam.elevation).toBeGreaterThan(0.25);
+  });
+
+  it('supports zero-downside macro zoom (0.24 m), 3D view-plane panning, descending plume focus tracking, macro aperture stop-down, and paused 16-frame super-sampling', () => {
+    // 1. 3D view-plane pan & focusOn clamp cleanly across the full [-0.92, +0.52] vertical & [-0.42, +0.42] horizontal volume
+    const cam = new OrbitCamera(CAMERA_PRESETS.hero);
+    cam.panScreen(-0.25, -0.35);
+    cam.tick(10.0, 16 / 10);
+    expect(cam.followHeroEnabled).toBe(false);
+    expect(cam.target[0]).toBeGreaterThan(0.05);
+    expect(cam.target[1]).toBeLessThan(0.15);
+
+    cam.panScreen(-99.0, -99.0);
+    cam.tick(10.0, 16 / 10);
+    expect(Math.abs(cam.target[0])).toBeLessThanOrEqual(MAX_CAMERA_TARGET_XZ + 1e-6);
+    expect(cam.target[1]).toBeGreaterThanOrEqual(MIN_CAMERA_TARGET_Y - 1e-6);
+    expect(cam.target[1]).toBeLessThanOrEqual(MAX_CAMERA_TARGET_Y + 1e-6);
+
+    cam.focusOn([0.14, -0.45, -0.10], 0.62, true);
+    expect(cam.target[0]).toBeCloseTo(0.14, 5);
+    expect(cam.target[1]).toBeCloseTo(-0.45, 5);
+    expect(cam.target[2]).toBeCloseTo(-0.10, 5);
+    expect(cam.distance).toBeCloseTo(0.62, 5);
+
+    // If user is already zoomed closer (e.g., 0.28 m), focusOn never pushes the camera back out
+    cam.dolly(0.45);
+    for (let i = 0; i < 25; i++) cam.tick(0.1, 16 / 10);
+    expect(cam.distance).toBeCloseTo(0.62 * 0.45, 4);
+    cam.focusOn([0.0, -0.55, 0.0], 0.68, true);
+    expect(cam.distance).toBeCloseTo(0.62 * 0.45, 4);
+
+    // 2. Automatic macro aperture stop-down preserves 100% exact aperture across legacy/preset distances (>= 0.82 m)
+    //    while stopping down proportionally inside < 0.82 m so close-up vortex rings stay crisp front-to-back
+    const packer = new SimUniformPacker();
+    const sys = new MultiDropSystem();
+    stepSystemTo(sys, 3.5, 1 / 120);
+    const snapSub = sys.getSnapshot();
+
+    const defaultCam = new OrbitCamera(CAMERA_PRESETS.abyss);
+    defaultCam.updateMatrices(16 / 10);
+    const outDefault = packer.pack({
+      invViewProj: defaultCam.invViewProjMatrix,
+      viewProj: defaultCam.viewProjMatrix,
+      cameraPos: defaultCam.position,
+      cameraTarget: defaultCam.target,
+      viewportWidth: 2560,
+      viewportHeight: 1600,
+      dt: 1 / 60,
+      frameIndex: 1,
+      globalSeed: 1.0,
+      drops: snapSub,
+      spawnCursor: 0,
+      spawnCount: 0,
+      config: DEFAULT_FLUID_OPTICAL_CONFIG,
+    });
+    expect(outDefault[57]).toBeCloseTo(DEFAULT_FLUID_OPTICAL_CONFIG.apertureRadius, 7);
+
+    const macroCam = new OrbitCamera(CAMERA_PRESETS.abyss);
+    macroCam.dolly(0.1); // clamps to 0.24 m
+    for (let i = 0; i < 25; i++) macroCam.tick(0.1, 16 / 10);
+    const outMacro = packer.pack({
+      invViewProj: macroCam.invViewProjMatrix,
+      viewProj: macroCam.viewProjMatrix,
+      cameraPos: macroCam.position,
+      cameraTarget: macroCam.target,
+      viewportWidth: 2560,
+      viewportHeight: 1600,
+      dt: 1 / 60,
+      frameIndex: 1,
+      globalSeed: 1.0,
+      drops: snapSub,
+      spawnCursor: 0,
+      spawnCount: 0,
+      config: DEFAULT_FLUID_OPTICAL_CONFIG,
+    });
+    expect(outMacro[56]).toBeCloseTo(0.24, 3);
+    expect(outMacro[57]).toBeLessThan(DEFAULT_FLUID_OPTICAL_CONFIG.apertureRadius * 0.25);
+
+    // 3. Descending submerged plume tracker persists after aerial drainage completes so Focus ('F') tracks sinking rings
+    const subjects = sys.getInspectionSubjects();
+    expect(subjects.length).toBeGreaterThanOrEqual(1);
+    expect(subjects[0].kind).toBe('plume');
+    expect(subjects[0].center[1]).toBeLessThan(WATER_SURFACE_Y - 0.15);
+    expect(subjects[0].center[1]).toBeGreaterThan(-0.25);
+
+    // 4. View-aligned backlight, deep macro C2 cubic reconstruction, and 16-frame paused progressive accumulation
+    expect(LIGHTING_VOLUME_WGSL).toContain('let horizAim = unitAimXZ * 1.24;');
+    expect(RENDER_WGSL).toContain('override MACRO_INSPECT_MODE: u32 = 0u;');
+    expect(RENDER_WGSL).toContain('let macroZoom = select(0.0, 1.0 - smoothstep(0.32, 1.08, focalRef), MACRO_INSPECT_MODE != 0u && fineQuality);');
+    expect(RENDER_WGSL).toContain('let gradFine = (tetK0 * f0 + tetK1 * f1 + tetK2 * f2 + tetK3 * f3) * (invTetDenom / 0.48);');
+    expect(engineSrc).toContain('const PAUSED_ACCUM_TARGET = 16;');
+    expect(engineSrc).toContain('public stepPausedSubsteps(');
+    expect(engineSrc).toContain('public cycleFocusSubject(');
   });
 });

@@ -69,7 +69,7 @@ import {
   SHOT_CYCLE_DURATION,
   raycastMeniscusXZ,
 } from '../sim/dropKinematics';
-import type { DropSlotState, MultiDropSnapshot } from '../sim/dropKinematics';
+import type { DropSlotState, InspectionSubject, MultiDropSnapshot } from '../sim/dropKinematics';
 import { generatePrahlSpectralLut } from '../sim/spectralLut';
 import {
   DEFAULT_FLUID_OPTICAL_CONFIG,
@@ -81,6 +81,7 @@ import type { FluidOpticalConfig } from '../sim/uniformLayout';
 
 export const FIXED_SIM_DT = 1.0 / 60.0;
 const MAX_SUBSTEPS = 3;
+const PAUSED_ACCUM_TARGET = 16;
 const PARTICLE_STRIDE_BYTES = 32; // 2 * vec4<f32> per RbcParcel
 const VOL_RENDER_MAX_PIXELS = 739_840; // Exact 1088x680 (16:10 isotropic, 8px aligned) + native 1:1 2560x1600 Retina drop/collar/meniscus/reflection composite
 
@@ -151,6 +152,15 @@ export class BloodDropEngine {
   private readonly uniformPacker = new SimUniformPacker();
   private readonly multiStepScratch = new Float32Array(SIM_UNIFORM_FLOATS * MAX_SUBSTEPS);
   private readonly substepSpawnCounts = new Int32Array(MAX_SUBSTEPS);
+  private heroTopsideCue = 0.0;
+  private pendingManualSubsteps = 0;
+  private lockedSubjectId: number | null = null;
+  private pausedAccumCount = 0;
+  private pausedBaseFrame = 0;
+  private readonly lastPausedViewProj = new Float32Array(16);
+  private lastPausedLightingMode = -1.0;
+  private lastPausedSimTime = -1.0;
+  private lastPausedDropSig = -1.0;
 
   private readonly uniformBuffer: GPUBuffer;
   private readonly uniformStagingBuffer: GPUBuffer;
@@ -237,6 +247,8 @@ export class BloodDropEngine {
   private readonly pBrickDilate: GPUComputePipeline;
   private readonly bglComposite: GPUBindGroupLayout;
   private readonly pRender: GPURenderPipeline;
+  private readonly pRenderMacro: GPURenderPipeline;
+  private readonly pRenderAccum: GPURenderPipeline;
   private readonly pCompositeSdr: GPURenderPipeline;
   private readonly pCompositeHdr: GPURenderPipeline;
   private pComposite: GPURenderPipeline;
@@ -897,14 +909,56 @@ export class BloodDropEngine {
 
     const renderMod = device.createShaderModule({ label: 'RenderShader', code: RENDER_WGSL });
     this.inspectCompilation('RenderShader', renderMod);
+    const renderLayout = device.createPipelineLayout({ bindGroupLayouts: [bglRender] });
     this.pRender = device.createRenderPipeline({
       label: 'RenderPipeline',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [bglRender] }),
+      layout: renderLayout,
       vertex: { module: renderMod, entryPoint: 'vsMain' },
       fragment: {
         module: renderMod,
         entryPoint: 'fsMain',
+        constants: { MACRO_INSPECT_MODE: 0 },
         targets: [{ format: 'rgba16float' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.pRenderMacro = device.createRenderPipeline({
+      label: 'RenderMacroPipeline',
+      layout: renderLayout,
+      vertex: { module: renderMod, entryPoint: 'vsMain' },
+      fragment: {
+        module: renderMod,
+        entryPoint: 'fsMain',
+        constants: { MACRO_INSPECT_MODE: 1 },
+        targets: [{ format: 'rgba16float' }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    this.pRenderAccum = device.createRenderPipeline({
+      label: 'RenderAccumPipeline',
+      layout: renderLayout,
+      vertex: { module: renderMod, entryPoint: 'vsMain' },
+      fragment: {
+        module: renderMod,
+        entryPoint: 'fsMain',
+        constants: { MACRO_INSPECT_MODE: 1 },
+        targets: [
+          {
+            format: 'rgba16float',
+            blend: {
+              color: {
+                srcFactor: 'constant',
+                dstFactor: 'one-minus-constant',
+                operation: 'add',
+              },
+              alpha: {
+                srcFactor: 'one',
+                dstFactor: 'zero',
+                operation: 'add',
+              },
+            },
+          },
+        ],
       },
       primitive: { topology: 'triangle-list' },
     });
@@ -1426,6 +1480,8 @@ export class BloodDropEngine {
   }
 
   public setCameraPreset(id: CameraPreset['id'], instant = false): void {
+    this.lockedSubjectId = null;
+    this.pausedAccumCount = 0;
     this.camera.applyPreset(CAMERA_PRESETS[id], instant);
     if (id === 'hero') {
       this.camera.syncHeroFollow(this.simTime, instant);
@@ -1434,6 +1490,7 @@ export class BloodDropEngine {
 
   public setLightingMode(darkChiaroscuro: boolean): void {
     this.config.lightingMode = darkChiaroscuro ? 1.0 : 0.0;
+    this.pausedAccumCount = 0;
   }
 
   /**
@@ -1444,6 +1501,7 @@ export class BloodDropEngine {
   public setExtendedHdr(enabled: boolean): void {
     if (this.destroyed || this.isDeviceLost) return;
     if (enabled === this.isExtendedHdr) return;
+    this.pausedAccumCount = 0;
     if (enabled) {
       try {
         this.context.configure({
@@ -1488,6 +1546,8 @@ export class BloodDropEngine {
         simTime: this.simTime,
         frameIndex: this.frameIndex,
         paused: this.paused,
+        pausedAccumCount: this.pausedAccumCount,
+        lockedSubjectId: this.lockedSubjectId,
         timeScale: this.timeScale,
         format: this.format,
         isExtendedHdr: this.isExtendedHdr,
@@ -1501,6 +1561,8 @@ export class BloodDropEngine {
       setPaused: (paused: boolean) => {
         this.paused = paused;
       },
+      stepFrames: (count = 1) => this.stepPausedSubsteps(count),
+      focusSubject: () => this.cycleFocusSubject(),
       seekSimTime: (t: number, seed = 1.0) => this.seekToSimTime(t, seed),
       setExtendedHdr: (enabled: boolean) => this.setExtendedHdr(enabled),
       getGpuPassTimings: () => ({ ...this.gpuPassTimingsMs }),
@@ -1638,7 +1700,12 @@ export class BloodDropEngine {
     this.multiDrops.reset(this.dropSeed, offsetXZ);
     this.dropOffsetXZ[0] = offsetXZ[0];
     this.dropOffsetXZ[1] = offsetXZ[1];
-    this.camera.syncHeroFollow(0.0, true);
+    this.heroTopsideCue = 0.0;
+    this.pendingManualSubsteps = 0;
+    this.lockedSubjectId = null;
+    this.pausedAccumCount = 0;
+    this.lastPausedSimTime = -1.0;
+    this.camera.syncHeroFollow(0.0, true, 0.0);
 
     this.uploadSnapshotUniforms(FIXED_SIM_DT, 0, 0);
 
@@ -1758,6 +1825,9 @@ export class BloodDropEngine {
   } {
     const snap = this.multiDrops.step(dt);
     this.simTime = snap.simTime;
+    if (this.paused && this.lockedSubjectId !== null) {
+      this.syncLockedSubjectTarget(true);
+    }
 
     const exactParcels =
       (snap.totalStepDrainedVolume / REFERENCE_DROP_VOLUME) * PARCELS_PER_REF_DROP +
@@ -2108,29 +2178,206 @@ export class BloodDropEngine {
     await this.device.queue.onSubmittedWorkDone();
   }
 
+  /**
+   * Pauses playback (if running) and queues `count` exact FIXED_SIM_DT slow-motion substeps
+   * to execute cleanly on the next renderFrame without breaking camera zoom/orbit state.
+   */
+  public stepPausedSubsteps(count = 1): void {
+    if (this.destroyed) return;
+    const clamped = Math.max(1, Math.min(12, Math.round(count)));
+    this.paused = true;
+    this.pendingManualSubsteps = Math.min(12, this.pendingManualSubsteps + clamped);
+    this.pausedAccumCount = 0;
+  }
+
+  public clearSubjectLock(): void {
+    this.lockedSubjectId = null;
+  }
+
+  public hasSubjectLock(): boolean {
+    return this.lockedSubjectId !== null;
+  }
+
+  /**
+   * Centers the orbit & thin-lens focal pivot on the newest active drop or descending vortex ring,
+   * cycling through concurrent drops/plumes on repeated presses.
+   */
+  public cycleFocusSubject(maxInspectDistance = 0.68): InspectionSubject | null {
+    if (this.destroyed) return null;
+    const subjects = this.multiDrops.getInspectionSubjects();
+    if (subjects.length === 0) {
+      this.lockedSubjectId = null;
+      this.camera.focusOn([0.0, 0.02, 0.0], maxInspectDistance, false);
+      return null;
+    }
+    let chosen = subjects[0];
+    if (this.lockedSubjectId !== null) {
+      const curIdx = subjects.findIndex((s) => s.id === this.lockedSubjectId);
+      if (curIdx >= 0) {
+        chosen = subjects[(curIdx + 1) % subjects.length];
+      }
+    }
+    this.lockedSubjectId = chosen.id;
+    this.camera.focusOn(chosen.center, maxInspectDistance, false);
+    this.pausedAccumCount = 0;
+    return chosen;
+  }
+
+  /**
+   * Projects all active drops and descending vortex rings into screen NDC and locks camera focus
+   * onto the subject closest to `(ndcX, ndcY)`.
+   */
+  public focusNearestSubjectAtNdc(
+    ndcX: number,
+    ndcY: number,
+    maxInspectDistance = 0.68
+  ): InspectionSubject | null {
+    if (this.destroyed) return null;
+    const subjects = this.multiDrops.getInspectionSubjects();
+    if (subjects.length === 0) {
+      return this.cycleFocusSubject(maxInspectDistance);
+    }
+    const aspect = (this.canvas.width || 1) / (this.canvas.height || 1);
+    this.camera.updateMatrices(aspect);
+    const vp = this.camera.viewProjMatrix;
+
+    let best = subjects[0];
+    let bestDist2 = Infinity;
+    for (const s of subjects) {
+      const [x, y, z] = s.center;
+      const clipX = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+      const clipY = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+      const clipW = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+      if (clipW <= 1e-4) continue;
+      const sx = clipX / clipW;
+      const sy = clipY / clipW;
+      const d2 = (sx - ndcX) * (sx - ndcX) + (sy - ndcY) * (sy - ndcY);
+      if (d2 < bestDist2) {
+        bestDist2 = d2;
+        best = s;
+      }
+    }
+
+    this.lockedSubjectId = best.id;
+    this.camera.focusOn(best.center, maxInspectDistance, false);
+    this.pausedAccumCount = 0;
+    return best;
+  }
+
+  private syncLockedSubjectTarget(instant = false): void {
+    if (this.lockedSubjectId === null || this.camera.followHeroEnabled) return;
+    const subjects = this.multiDrops.getInspectionSubjects();
+    if (subjects.length === 0) return;
+
+    let match = subjects.find((s) => s.id === this.lockedSubjectId);
+    if (!match) {
+      // Seamless handoff when a locked aerial drop finishes draining into its nascent submerged vortex ring
+      let closestPlume: InspectionSubject | null = null;
+      let bestD2 = 0.04; // within 20 cm of current camera target
+      for (const s of subjects) {
+        const dx = s.center[0] - this.camera.target[0];
+        const dy = s.center[1] - this.camera.target[1];
+        const dz = s.center[2] - this.camera.target[2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < bestD2) {
+          bestD2 = d2;
+          closestPlume = s;
+        }
+      }
+      if (closestPlume) {
+        this.lockedSubjectId = closestPlume.id;
+        match = closestPlume;
+      } else {
+        this.lockedSubjectId = null;
+        return;
+      }
+    }
+
+    this.camera.focusOn(match.center, undefined, instant);
+    if (instant) {
+      this.camera.updateMatrices((this.canvas.width || 1) / (this.canvas.height || 1));
+    }
+  }
+
+  private computePausedDropSignature(snap: MultiDropSnapshot): number {
+    let sig = snap.activeCount * 101.0;
+    const slots = snap.slots;
+    for (let i = 0; i < slots.length; i++) {
+      const s = slots[i];
+      if (!s.active) continue;
+      sig +=
+        (i + 1) *
+        (s.center[0] * 13.0 +
+          s.center[1] * 31.0 +
+          s.center[2] * 47.0 +
+          s.radius * 97.0 +
+          s.pipettePresence * 7.0);
+    }
+    return sig;
+  }
+
+  private isPausedSceneStationary(dropSig: number): boolean {
+    if (Math.abs(this.simTime - this.lastPausedSimTime) > 1e-7) return false;
+    if (Math.abs(this.config.lightingMode - this.lastPausedLightingMode) > 1e-5) return false;
+    if (Math.abs(dropSig - this.lastPausedDropSig) > 1e-6) return false;
+    const cw = Math.max(2, this.canvas.width || 1280);
+    const ch = Math.max(2, this.canvas.height || 800);
+    if (cw !== this.volSwapW || ch !== this.volSwapH) return false;
+    const vp = this.camera.viewProjMatrix;
+    for (let i = 0; i < 16; i++) {
+      if (Math.abs(vp[i] - this.lastPausedViewProj[i]) > 1e-5) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private recordPausedSceneSignature(dropSig: number): void {
+    this.lastPausedSimTime = this.simTime;
+    this.lastPausedLightingMode = this.config.lightingMode;
+    this.lastPausedDropSig = dropSig;
+    this.lastPausedViewProj.set(this.camera.viewProjMatrix);
+  }
+
   private encodeOpticalRenderPasses(
     enc: GPUCommandEncoder,
     swapView: GPUTextureView,
-    recordTimestamps = false
+    recordTimestamps = false,
+    accumBlendWeight = 1.0,
+    skipVolumetricPass = false
   ): void {
     this.ensureVolRenderTarget();
 
-    const volPass = enc.beginRenderPass({
-      label: 'VolumetricHDRPass',
-      timestampWrites: recordTimestamps ? this.tsPass3 : undefined,
-      colorAttachments: [
-        {
-          view: this.viewVolRender,
-          clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    });
-    volPass.setPipeline(this.pRender);
-    volPass.setBindGroup(0, this.bgRender[this.concState][this.waveState]);
-    volPass.draw(3, 1, 0, 0);
-    volPass.end();
+    if (!skipVolumetricPass) {
+      const useAccumBlend = accumBlendWeight < 0.999;
+      const volPass = enc.beginRenderPass({
+        label: 'VolumetricHDRPass',
+        timestampWrites: recordTimestamps ? this.tsPass3 : undefined,
+        colorAttachments: [
+          {
+            view: this.viewVolRender,
+            clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            loadOp: useAccumBlend ? 'load' : 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      if (useAccumBlend) {
+        volPass.setPipeline(this.pRenderAccum);
+        volPass.setBlendConstant({
+          r: accumBlendWeight,
+          g: accumBlendWeight,
+          b: accumBlendWeight,
+          a: 1.0,
+        });
+      } else {
+        const useMacroInspectPso = this.paused || this.camera.distance < 1.08;
+        volPass.setPipeline(useMacroInspectPso ? this.pRenderMacro : this.pRender);
+      }
+      volPass.setBindGroup(0, this.bgRender[this.concState][this.waveState]);
+      volPass.draw(3, 1, 0, 0);
+      volPass.end();
+    }
 
     const compPass = enc.beginRenderPass({
       label: 'CompositeToneMapPass',
@@ -2213,6 +2460,9 @@ export class BloodDropEngine {
     const swapView = this.acquireSwapchainView();
     if (!swapView) return;
 
+    this.pausedAccumCount = 0;
+    this.lastPausedSimTime = -1.0;
+
     const aspect = (this.canvas.width || 1) / (this.canvas.height || 1);
     this.camera.updateMatrices(aspect);
     this.uploadSnapshotUniforms(0.0, this.spawnCursor, 0);
@@ -2241,11 +2491,32 @@ export class BloodDropEngine {
 
     const clampedRealDt = Math.min(Math.max(dtRealSec, 0.0), 0.05);
     const aspect = (this.canvas.width || 1) / (this.canvas.height || 1);
-    this.camera.syncHeroFollow(this.simTime, false);
+    let hasSubsequentTopsideDrop = false;
+    if (this.simTime > 1.35) {
+      const slots = this.multiDrops.slots;
+      for (let i = 0; i < slots.length; i++) {
+        const sl = slots[i];
+        if (!sl.active) continue;
+        if (sl.mode === 'pendant' || sl.mode === 'aerial' || (sl.mode === 'coalescing' && sl.ageInPhase < 0.28)) {
+          hasSubsequentTopsideDrop = true;
+          break;
+        }
+      }
+    }
+    const cueTarget = hasSubsequentTopsideDrop ? 1.0 : 0.0;
+    const cueRate = cueTarget > this.heroTopsideCue ? 7.5 : 2.2;
+    this.heroTopsideCue += (cueTarget - this.heroTopsideCue) * (1.0 - Math.exp(-clampedRealDt * cueRate));
+    this.camera.syncHeroFollow(this.simTime, false, this.heroTopsideCue);
+    this.syncLockedSubjectTarget();
     this.camera.tick(clampedRealDt, aspect);
 
     let substeps = 0;
-    if (!this.paused && this.timeScale > 0.0) {
+    if (this.pendingManualSubsteps > 0) {
+      substeps = Math.min(MAX_SUBSTEPS, this.pendingManualSubsteps);
+      this.pendingManualSubsteps -= substeps;
+      this.pausedAccumCount = 0;
+      this.lastPausedSimTime = -1.0;
+    } else if (!this.paused && this.timeScale > 0.0) {
       const stepBudget = this.timeScale > 1.05 ? MAX_SUBSTEPS : 1;
       this.simAccumulator += clampedRealDt * this.timeScale;
       while (this.simAccumulator >= FIXED_SIM_DT && substeps < stepBudget) {
@@ -2269,25 +2540,61 @@ export class BloodDropEngine {
     }
 
     if (substeps === 0) {
-      this.frameIndex++;
-      const kin = this.uploadSnapshotUniforms(0.0, this.spawnCursor, 0);
-      const enc = this.device.createCommandEncoder({ label: 'PausedFrameEncoder' });
-      const lPass = enc.beginComputePass({
-        label: 'PausedLightingPass',
-        timestampWrites: this.tsPass2,
-      });
-      this.encodeLightingPasses(lPass);
-      lPass.end();
+      const snap = this.multiDrops.getSnapshot();
+      const dropSig = this.computePausedDropSignature(snap);
+      const stationary = this.paused && this.pausedAccumCount > 0 && this.isPausedSceneStationary(dropSig);
 
-      this.encodeOpticalRenderPasses(enc, swapView, true);
-      const tsSlot = this.resolvePassTimestamps(enc, false);
+      if (!stationary) {
+        this.frameIndex++;
+        this.pausedBaseFrame = this.frameIndex;
+        this.pausedAccumCount = 1;
+        this.recordPausedSceneSignature(dropSig);
 
-      this.device.queue.submit([enc.finish()]);
-      if (tsSlot >= 0) {
-        this.collectPassTimestamps(tsSlot as 0 | 1, false);
+        const kin = this.uploadSnapshotUniforms(0.0, this.spawnCursor, 0);
+        const enc = this.device.createCommandEncoder({ label: 'PausedFrameEncoder' });
+        const lPass = enc.beginComputePass({
+          label: 'PausedLightingPass',
+          timestampWrites: this.tsPass2,
+        });
+        this.encodeLightingPasses(lPass);
+        lPass.end();
+
+        this.encodeOpticalRenderPasses(enc, swapView, true, 1.0, false);
+        const tsSlot = this.resolvePassTimestamps(enc, false);
+
+        this.device.queue.submit([enc.finish()]);
+        if (tsSlot >= 0) {
+          this.collectPassTimestamps(tsSlot as 0 | 1, false);
+        }
+        return kin;
       }
+
+      if (this.pausedAccumCount < PAUSED_ACCUM_TARGET) {
+        // Stationary paused progressive super-sampling (frames 2..16): skip static 3D lighting compute,
+        // stratify golden-ratio raymarch phase (dt = -1.0 sentinel), and hardware-blend into VolRenderHDR_F16.
+        const sampleIdx = this.pausedAccumCount;
+        this.pausedAccumCount++;
+        this.frameIndex = this.pausedBaseFrame + sampleIdx;
+        const blendW = 1.0 / this.pausedAccumCount;
+        const kin = this.uploadSnapshotUniforms(-1.0, this.spawnCursor, 0);
+        const enc = this.device.createCommandEncoder({ label: 'PausedAccumEncoder' });
+        this.encodeOpticalRenderPasses(enc, swapView, false, blendW, false);
+        this.device.queue.submit([enc.finish()]);
+        return kin;
+      }
+
+      // Fully converged stationary pause (pausedAccumCount >= 16): skip lighting & volumetric passes completely,
+      // presenting the converged 16-sample VolRenderHDR_F16 buffer at native Retina with zero shimmer (< 0.5 ms GPU).
+      this.frameIndex = this.pausedBaseFrame + PAUSED_ACCUM_TARGET - 1;
+      const kin = this.uploadSnapshotUniforms(0.0, this.spawnCursor, 0);
+      const enc = this.device.createCommandEncoder({ label: 'PausedConvergedEncoder' });
+      this.encodeOpticalRenderPasses(enc, swapView, false, 1.0, true);
+      this.device.queue.submit([enc.finish()]);
       return kin;
     }
+
+    this.pausedAccumCount = 0;
+    this.lastPausedSimTime = -1.0;
 
     if (substeps === 1) {
       this.frameIndex++;

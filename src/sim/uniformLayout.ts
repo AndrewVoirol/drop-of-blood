@@ -113,28 +113,42 @@ export class SimUniformPacker {
     out[55] = FRONT_PANE_DIST;
 
     // Compute thin-lens focal distance along the camera optical axis: anchor to aerial/pendant drop
-    // when viewing from above water, blending smoothly into the camera orbit target underwater.
+    // when viewing near/above the meniscus from topside, blending smoothly into the 3D orbit target
+    // when submerged or when manually focused/panned onto a deep underwater plume.
     const dxT = cameraTarget[0] - cameraPos[0];
     const dyT = cameraTarget[1] - cameraPos[1];
     const dzT = cameraTarget[2] - cameraPos[2];
     const baseTargetDist = Math.hypot(dxT, dyT, dzT);
-    let focalDistance = Math.max(0.25, baseTargetDist);
+    let focalDistance = Math.max(0.20, baseTargetDist);
     if (drops.primaryAerialFocus && cameraPos[1] > WATER_SURFACE_Y + 0.004) {
-      const f = drops.primaryAerialFocus;
-      const dfx = f[0] - cameraPos[0];
-      const dfy = f[1] - cameraPos[1];
-      const dfz = f[2] - cameraPos[2];
-      const dropAxialDist =
-        baseTargetDist > 1e-6
-          ? (dfx * dxT + dfy * dyT + dfz * dzT) / baseTargetDist
-          : Math.hypot(dfx, dfy, dfz);
-      const airBlend = Math.min(1.0, Math.max(0.0, (cameraPos[1] - WATER_SURFACE_Y) / 0.025));
-      focalDistance = focalDistance * (1.0 - airBlend) + Math.max(0.25, dropAxialDist) * airBlend;
+      const targetTopsideGate = Math.min(
+        1.0,
+        Math.max(0.0, (cameraTarget[1] - (WATER_SURFACE_Y - 0.24)) / 0.12)
+      );
+      if (targetTopsideGate > 0.001) {
+        const f = drops.primaryAerialFocus;
+        const dfx = f[0] - cameraPos[0];
+        const dfy = f[1] - cameraPos[1];
+        const dfz = f[2] - cameraPos[2];
+        const dropAxialDist =
+          baseTargetDist > 1e-6
+            ? (dfx * dxT + dfy * dyT + dfz * dzT) / baseTargetDist
+            : Math.hypot(dfx, dfy, dfz);
+        const airBlend =
+          Math.min(1.0, Math.max(0.0, (cameraPos[1] - WATER_SURFACE_Y) / 0.025)) *
+          targetTopsideGate;
+        focalDistance = focalDistance * (1.0 - airBlend) + Math.max(0.20, dropAxialDist) * airBlend;
+      }
     }
+
+    // Automatic macro aperture stop-down inside < 0.82 m (the newly unlocked macro zoom range) keeps both
+    // near and far vortex-ring filaments sharp during close-up inspection while leaving the entire legacy
+    // [0.82, 2.85] m camera range and all default presets 100% bit-exact (scale === 1.0).
+    const macroStopScale = Math.min(1.0, Math.pow(Math.max(focalDistance, 0.20) / 0.82, 1.25));
 
     // [56..59] lensAndRheology (.x = focalDistance, .y = apertureRadius, .z = cassonYield, .w = hemolysisRate)
     out[56] = focalDistance;
-    out[57] = Math.max(0.0, config.apertureRadius);
+    out[57] = Math.max(0.0, config.apertureRadius) * macroStopScale;
     out[58] = config.cassonYield;
     out[59] = config.hemolysisRate;
 

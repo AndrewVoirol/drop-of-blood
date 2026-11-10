@@ -485,23 +485,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     mac.y = mac.y + buoyAccel * dt;
   }
 
-  // 4. Deep-column secondary baroclinic unfurling (active below early vortex roll-up so the upper stem
-  //    and initial torus stay crisp while settling plumes unfurl and coalesce into multi-scale curtains):
+  // 4. Deep-column 3D solenoidal (k_i . d_i == 0 -> div == 0) secondary baroclinic unfurling below initial roll-up:
   let pCell = uvwToWorld(uvwCell, u);
   let depthBelow = u.surfaceParams.x - pCell.y;
   let unfurlGate = smoothstep(0.11, 0.36, depthBelow) * smoothstep(0.0008, 0.015, cRbc + 0.45 * concCell.g);
   if (unfurlGate > 0.001) {
-    let tSwirl = u.cameraPosAndTime.w * 0.38 + u.particleParams.x * 1.7;
-    // Divergence-free horizontal + vertical baroclinic streamfunctions -> organic tendril & curtain unfurling
-    let q1 = pCell.x * 9.3 + pCell.z * 6.7 + pCell.y * 5.1 + tSwirl;
-    let q2 = pCell.z * 11.1 - pCell.x * 7.9 + pCell.y * 6.3 - tSwirl * 0.77;
-    let q3 = pCell.x * 16.7 - pCell.z * 14.3 + pCell.y * 11.9 + tSwirl * 1.15;
-    let swirlX = ((6.7 * cos(q1) + 11.1 * cos(q2)) * 0.0038 - 14.3 * sin(q3) * 0.0018) * unfurlGate;
-    let swirlZ = (-(9.3 * cos(q1) - 7.9 * cos(q2)) * 0.0038 - 16.7 * sin(q3) * 0.0018) * unfurlGate;
-    let billowY = sin(q1 * 0.85 - q2 * 0.65) * 0.0085 * unfurlGate * smoothstep(0.18, 0.45, depthBelow);
-    mac.x = mac.x + swirlX * dt;
-    mac.y = mac.y + billowY * dt;
-    mac.z = mac.z + swirlZ * dt;
+    let tSwirl = u.cameraPosAndTime.w * 0.36 + u.particleParams.x * 1.7;
+    let q1 = 6.4 * pCell.x + 4.0 * pCell.y + 5.2 * pCell.z + tSwirl;
+    let q2 = -5.6 * pCell.x + 4.8 * pCell.y + 7.2 * pCell.z - tSwirl * 0.77;
+    let q3 = 9.0 * pCell.x - 6.0 * pCell.y - 6.4 * pCell.z + tSwirl * 1.13;
+    // Exact transverse polarizations: k1.d1 == 0, k2.d2 == 0, k3.d3 == 0
+    let solForce = vec3<f32>(-6.25, 2.85, 5.50) * cos(q1)
+                 + vec3<f32>(-6.30, -1.26, -4.06) * cos(q2)
+                 + vec3<f32>(6.40, -0.96, 9.90) * (0.42 * sin(q3));
+    let vertMod = smoothstep(0.16, 0.42, depthBelow);
+    mac = mac + vec3<f32>(solForce.x, solForce.y * vertMod, solForce.z) * (0.0028 * unfurlGate * dt);
   }
 
   mac = clamp(mac, vec3<f32>(-1.8), vec3<f32>(1.8));
@@ -943,20 +941,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let wB = select(textureLoad(velMacIn, vec3<i32>(ix, iy, max(iz - 1, 0)), 0).z, 0.0, iz == 0);
 
   var vCenter = 0.5 * vec3<f32>(uL + uR, vD + vU, wB + wF) + vec3<f32>(u.domainBounds.x * 0.0);
-  if (iy >= ${VEL_GRID_Y - 9} && vCenter.y < 0.0) {
+  if (iy >= ${VEL_GRID_Y - 2} && vCenter.y < 0.0) {
     let dims = vec3<f32>(${VEL_GRID_X}.0, ${VEL_GRID_Y}.0, ${VEL_GRID_Z}.0);
     let pCell = uvwToWorld((vec3<f32>(gid) + 0.5) / dims, u);
     var activeNeck = 0.0;
     for (var d = 0u; d < ${MAX_ACTIVE_DROPS}u; d = d + 1u) {
       let slot = u.drops[d];
-      if (slot.velOscAndDrain.w > 0.0 && slot.velOscAndDrain.z > 0.015) {
-        let rActive = clamp(slot.posAndRadius.w * 0.85, 0.012, 0.036);
+      if (slot.velOscAndDrain.w > 0.0 && slot.velOscAndDrain.z > 0.008) {
+        let rActive = clamp(slot.posAndRadius.w * 1.15 + 0.032, 0.046, 0.092);
         let rDist = length(pCell.xz - slot.posAndRadius.xz);
-        let drainGate = smoothstep(0.015, 0.095, slot.velOscAndDrain.z);
-        activeNeck = max(activeNeck, (1.0 - smoothstep(rActive * 0.72, rActive * 1.15, rDist)) * drainGate);
+        let drainGate = smoothstep(0.008, 0.065, slot.velOscAndDrain.z);
+        activeNeck = max(activeNeck, (1.0 - smoothstep(rActive * 0.78, rActive * 1.20, rDist)) * drainGate);
       }
     }
-    let stagGate = smoothstep(0.006, 0.072, max(0.0, u.surfaceParams.x - pCell.y));
+    let stagGate = mix(0.45, 1.0, smoothstep(0.002, 0.018, max(0.0, u.surfaceParams.x - pCell.y)));
     vCenter.y = vCenter.y * mix(stagGate, 1.0, activeNeck);
   }
   textureStore(velCenterOut, vec3<i32>(ix, iy, iz), vec4<f32>(vCenter, 0.0));

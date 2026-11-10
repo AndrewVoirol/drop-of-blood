@@ -6,6 +6,11 @@ import {
 } from './common';
 
 const WAVE_DOMAIN_LEN = (WAVE_HALF_EXTENT * 2.0).toFixed(4);
+const WAVE_HALF_GRID = WAVE_GRID_SIZE / 2;
+const WAVE_FFT_STAGES = Math.round(Math.log2(WAVE_GRID_SIZE));
+const WAVE_BIT_REV_SHIFT = 32 - WAVE_FFT_STAGES;
+const WAVE_UNITARY_SCALE = (1.0 / Math.sqrt(WAVE_GRID_SIZE)).toFixed(11);
+const WAVE_LAP_SCALE = Math.pow(WAVE_GRID_SIZE / 256.0, 2.0).toFixed(4);
 
 export const WAVE_CLEAR_WGSL = /* wgsl */ `
 ${COMMON_WGSL}
@@ -87,7 +92,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let fnw = loadWaveClamped(ix - 1, iy + 1).a;
   let fse = loadWaveClamped(ix + 1, iy - 1).a;
   let fsw = loadWaveClamped(ix - 1, iy - 1).a;
-  let lapFilm = 0.20 * (fn0 + fs0 + fe0 + fw0) + 0.05 * (fne + fnw + fse + fsw) - crimsonFilm;
+  let rawLapFilm = 0.20 * (fn0 + fs0 + fe0 + fw0) + 0.05 * (fne + fnw + fse + fsw) - crimsonFilm;
+  let lapFilm = rawLapFilm * ${WAVE_LAP_SCALE};
 
   let uv = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / ${WAVE_GRID_SIZE.toFixed(1)};
   let worldXZ = waveUVToWorldXZ(uv);
@@ -117,12 +123,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let impactShape = exp(-rNorm * rNorm) * (1.0 - rNorm * rNorm);
       let dynImpulse = (6.8 * impactBell * (rDrop / 0.056)) * (0.72 + 2.65 * speedY);
 
-      // Wetting-neck capillary meniscus contact impulse exciting dispersive precursor wavelets
-      let rCap = clamp(rDrop * 0.52, 0.018, 0.036);
+      // Wetting-neck capillary meniscus contact impulse exciting dispersive precursor wavelets (resolved at dx = 6.25 mm)
+      let rCap = clamp(rDrop * 0.44, 0.013, 0.030);
       let rNormCap = r / rCap;
       let capWindow = smoothstep(-0.35, 0.28, emergNorm) * (1.0 - smoothstep(0.68, 1.06, emergNorm));
       let capShape = exp(-rNormCap * rNormCap) * (1.0 - rNormCap * rNormCap);
-      let capImpulse = (3.4 * capWindow * (0.60 + 0.40 * (rDrop / 0.056))) * (0.65 + 2.20 * speedY);
+      let capImpulse = (4.6 * capWindow * (0.60 + 0.40 * (rDrop / 0.056))) * (0.65 + 2.20 * speedY);
 
       forceDrops = forceDrops - dynImpulse * impactShape - capImpulse * capShape;
       activeExcav = max(activeExcav, excavGate * exp(-0.5 * rNorm * rNorm));
@@ -138,7 +144,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let marangoniStr = u.surfaceParams.y;
   let effLapFilm = mix(max(lapFilm, -0.0015), lapFilm, activeExcav);
   let forceMarangoni = marangoniStr * 0.28 * effLapFilm;
-  crimsonFilm = clamp(crimsonFilm + marangoniStr * 0.065 * lapFilm * timeScale, 0.0, 1.0);
+  crimsonFilm = clamp(crimsonFilm + marangoniStr * 0.065 * rawLapFilm * timeScale, 0.0, 1.0);
   crimsonFilm = crimsonFilm * pow(0.88, timeScale);
 
   // 3. Two-way 3D MAC subsurface upward feedback gated to active coalescence (preventing perpetual deep return-flow sonar rings!)
@@ -172,14 +178,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 function createRadix2Fft1DShader(direction: 'row' | 'col', inverse: boolean): string {
   const fftSign = inverse ? '1.0' : '-1.0';
-  const loadCoord =
+  const loadCoord0 =
     direction === 'row'
-      ? 'vec2<i32>(i32(rev), i32(lineIdx))'
-      : 'vec2<i32>(i32(lineIdx), i32(rev))';
-  const storeCoord =
+      ? 'vec2<i32>(i32(rev0), i32(lineIdx))'
+      : 'vec2<i32>(i32(lineIdx), i32(rev0))';
+  const loadCoord1 =
     direction === 'row'
-      ? 'vec2<i32>(i32(tid), i32(lineIdx))'
-      : 'vec2<i32>(i32(lineIdx), i32(tid))';
+      ? 'vec2<i32>(i32(rev1), i32(lineIdx))'
+      : 'vec2<i32>(i32(lineIdx), i32(rev1))';
+  const storeCoord0 =
+    direction === 'row'
+      ? 'vec2<i32>(i32(idx0), i32(lineIdx))'
+      : 'vec2<i32>(i32(lineIdx), i32(idx0))';
+  const storeCoord1 =
+    direction === 'row'
+      ? 'vec2<i32>(i32(idx1), i32(lineIdx))'
+      : 'vec2<i32>(i32(lineIdx), i32(idx1))';
 
   return /* wgsl */ `
 ${COMMON_WGSL}
@@ -190,7 +204,7 @@ ${COMMON_WGSL}
 
 var<workgroup> smem: array<vec2<f32>, ${WAVE_GRID_SIZE}>;
 
-@compute @workgroup_size(${WAVE_GRID_SIZE}, 1, 1)
+@compute @workgroup_size(256, 1, 1)
 fn main(
   @builtin(local_invocation_id) lid: vec3<u32>,
   @builtin(workgroup_id) wid: vec3<u32>
@@ -201,19 +215,20 @@ fn main(
     return;
   }
 
-  // Exact 8-bit bit-reversal for N = 256
-  let rev = reverseBits(tid) >> 24u;
-  let src = textureLoad(specIn, ${loadCoord}, 0);
-  smem[tid] = src.xy;
+  // Exact 9-bit bit-reversal for N = 512 using 256 threads (1 butterfly/thread/stage, 4 KB smem)
+  let idx0 = tid;
+  let idx1 = tid + 256u;
+  let rev0 = reverseBits(idx0) >> ${WAVE_BIT_REV_SHIFT}u;
+  let rev1 = reverseBits(idx1) >> ${WAVE_BIT_REV_SHIFT}u;
+  smem[idx0] = textureLoad(specIn, ${loadCoord0}, 0).xy;
+  smem[idx1] = textureLoad(specIn, ${loadCoord1}, 0).xy;
   workgroupBarrier();
 
-  for (var stage = 0u; stage < 8u; stage = stage + 1u) {
+  for (var stage = 0u; stage < ${WAVE_FFT_STAGES}u; stage = stage + 1u) {
     let halfSpan = 1u << stage;
     let span = halfSpan << 1u;
-    let blockBase = (tid / span) * span;
-    let offset = tid & (span - 1u);
-    let isTop = offset < halfSpan;
-    let k = select(offset - halfSpan, offset, isTop);
+    let k = tid & (halfSpan - 1u);
+    let blockBase = (tid >> stage) << (stage + 1u);
     let i0 = blockBase + k;
     let i1 = i0 + halfSpan;
 
@@ -223,15 +238,18 @@ fn main(
     let c = cos(angle);
     let s = sin(angle);
     let twB = vec2<f32>(b.x * c - b.y * s, b.x * s + b.y * c);
-    let nextVal = select(a - twB, a + twB, isTop);
     workgroupBarrier();
-    smem[tid] = nextVal;
+    smem[i0] = a + twB;
+    smem[i1] = a - twB;
     workgroupBarrier();
   }
 
-  // Exact unitary 1/sqrt(256) = 1/16 scaling on every 1D transform
-  let scaled = smem[tid] * 0.0625 + vec2<f32>(u.surfaceParams.x * 0.0);
-  textureStore(specOut, ${storeCoord}, vec4<f32>(scaled.x, scaled.y, 0.0, 0.0));
+  // Exact unitary 1/sqrt(N) scaling on every 1D transform
+  let zeroBias = vec2<f32>(u.surfaceParams.x * 0.0);
+  let scaled0 = smem[idx0] * ${WAVE_UNITARY_SCALE} + zeroBias;
+  let scaled1 = smem[idx1] * ${WAVE_UNITARY_SCALE} + zeroBias;
+  textureStore(specOut, ${storeCoord0}, vec4<f32>(scaled0.x, scaled0.y, 0.0, 0.0));
+  textureStore(specOut, ${storeCoord1}, vec4<f32>(scaled1.x, scaled1.y, 0.0, 0.0));
 }
 `;
 }
@@ -264,13 +282,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let uy = i32(gid.y);
 
   // Enforce exact zero DC mean (int eta dx dz == 0) and suppress Nyquist 2-texel border
-  if ((ux == 0 && uy == 0) || ux == 128 || uy == 128) {
+  if ((ux == 0 && uy == 0) || ux == ${WAVE_HALF_GRID} || uy == ${WAVE_HALF_GRID}) {
     textureStore(specOut, vec2<i32>(ux, uy), vec4<f32>(0.0));
     return;
   }
 
-  let nx = (256 - ux) & 255;
-  let ny = (256 - uy) & 255;
+  let nx = (${WAVE_GRID_SIZE} - ux) & ${WAVE_GRID_SIZE - 1};
+  let ny = (${WAVE_GRID_SIZE} - uy) & ${WAVE_GRID_SIZE - 1};
 
   let fPos = textureLoad(specIn, vec2<i32>(ux, uy), 0).xy;
   let fNeg = textureLoad(specIn, vec2<i32>(nx, ny), 0).xy;
@@ -279,8 +297,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let etaHat = 0.5 * vec2<f32>(fPos.x + fNeg.x, fPos.y - fNeg.y);
   let velHat = 0.5 * vec2<f32>(fPos.y + fNeg.y, -fPos.x + fNeg.x);
 
-  let mx = f32(select(ux, ux - 256, ux > 128));
-  let mz = f32(select(uy, uy - 256, uy > 128));
+  let mx = f32(select(ux, ux - ${WAVE_GRID_SIZE}, ux > ${WAVE_HALF_GRID}));
+  let mz = f32(select(uy, uy - ${WAVE_GRID_SIZE}, uy > ${WAVE_HALF_GRID}));
   let twoPiOverL = 6.28318530718 / ${WAVE_DOMAIN_LEN};
   let kx = mx * twoPiOverL;
   let kz = mz * twoPiOverL;
@@ -291,16 +309,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let depthH = u.domainBounds.z - u.domainBounds.y; // 1.28 tank depth
   let tanhKH = tanh(min(k * depthH, 12.0));
 
-  // Physical elastocapillary dispersion in cuvette world units (resolving fine 2-8 mm capillary precursor wavelets):
+  // Physical elastocapillary dispersion in cuvette world units (resolving fine capillary precursor wavelets at dx = 6.25 mm):
   // omega(k_crater=34) ~ 11.1 rad/s (half-period T/2 ~ 0.28s -> crisp central swell rebound + dispersive capillary train)
   let gEff = 0.84;
   let sigmaOverRho = 0.0024;
   let omega = sqrt(max((gEff * k + sigmaOverRho * k * k2) * tanhKH, 1e-8));
 
   // Physical slow-motion viscous capillary-gravity damping + smooth high-k spectral de-aliasing roll-off:
-  // Ripples radiate cleanly across the open canvas and settle naturally without multi-second sloshing!
-  let viscRate = 0.36 + 0.00028 * k2;
-  let nyquistRoll = 1.0 - smoothstep(185.0, 245.0, k);
+  // Preserves dispersive k = 110..330 capillary precursor rings ahead of the main swell while settling cleanly!
+  let viscRate = 0.36 + 0.00018 * k2;
+  let nyquistRoll = 1.0 - smoothstep(335.0, 465.0, k);
   let damp = exp(-viscRate * dt) * nyquistRoll;
 
   let phase = omega * dt;
@@ -319,7 +337,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /**
  * Spatial post-IFFT finalize pass:
  * Combines propagated real (eta, w) from specWaveIn with surfactant film from specAuxIn,
- * evaluates dimensionless 9-point isotropic Laplacian into .b (for refractive caustics & Young-Laplace top pressure),
+ * evaluates resolution-normalized 9-point isotropic Laplacian into .b (for refractive caustics & Young-Laplace top pressure),
  * and writes filterable rgba16float texWave.
  */
 export const WAVE_FINALIZE_WGSL = /* wgsl */ `
@@ -356,7 +374,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let se = loadEta(ix + 1, iy - 1);
   let sw = loadEta(ix - 1, iy - 1);
 
-  let lap = 0.20 * (n + s + e + w) + 0.05 * (ne + nw + se + sw) - prop.x;
+  let lap = (0.20 * (n + s + e + w) + 0.05 * (ne + nw + se + sw) - prop.x) * ${WAVE_LAP_SCALE};
 
   let uv = (vec2<f32>(f32(ix), f32(iy)) + 0.5) / ${WAVE_GRID_SIZE.toFixed(1)};
   let worldXZ = waveUVToWorldXZ(uv);

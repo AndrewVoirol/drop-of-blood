@@ -564,7 +564,10 @@ async function main() {
           @compute @workgroup_size(64)
           fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (gid.x < 64u) {
-              outBuf[gid.x] = textureLoad(waveTex, vec2<i32>(128 + i32(gid.x), 128), 0);
+              let dims = vec2<i32>(textureDimensions(waveTex));
+              let halfDim = dims.x / 2;
+              let stride = max(1, dims.x / 256);
+              outBuf[gid.x] = textureLoad(waveTex, vec2<i32>(halfDim + i32(gid.x) * stride, halfDim), 0);
             }
           }
         \`

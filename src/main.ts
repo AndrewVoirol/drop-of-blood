@@ -60,21 +60,27 @@ async function bootstrap(): Promise<void> {
   });
   resizeObserver.observe(canvas);
 
-  // Pointer 3D orbit, pinch-zoom, stationary click-to-drop & press-and-hold pendant swelling
+  // Pointer 3D orbit, 1:1 3D pan, macro zoom, subject focus, click-to-drop & press-and-hold pendant swelling
   const DRAG_ORBIT_THRESHOLD_PX = 5.0;
   const PENDANT_HOLD_DELAY_MS = 160.0;
 
   const activePointers = new Map<number, { x: number; y: number }>();
   let prevPinchDist = 0;
+  let prevPinchMidX = 0;
+  let prevPinchMidY = 0;
 
   const gesture = {
     pointerId: null as number | null,
+    button: 0,
+    shiftDown: false,
+    altDown: false,
     downX: 0,
     downY: 0,
     downTimeMs: 0,
     ndcX: 0,
     ndcY: 0,
-    isOrbiting: false,
+    isDragging: false,
+    dragMode: 'orbit' as 'orbit' | 'pan',
     pendantStarted: false,
   };
 
@@ -87,14 +93,23 @@ async function bootstrap(): Promise<void> {
     return [ndcX, ndcY];
   };
 
-  const getPinchDistance = (): number => {
+  const getPinchMetrics = (): { dist: number; midX: number; midY: number } => {
     const pts = Array.from(activePointers.values());
-    if (pts.length < 2) return 0;
-    return Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    if (pts.length < 2) return { dist: 0, midX: 0, midY: 0 };
+    return {
+      dist: Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y),
+      midX: 0.5 * (pts[0].x + pts[1].x),
+      midY: 0.5 * (pts[0].y + pts[1].y),
+    };
   };
 
+  canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+  });
+
   canvas.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    if (e.button === 1) e.preventDefault();
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try {
       canvas.setPointerCapture(e.pointerId);
@@ -104,21 +119,29 @@ async function bootstrap(): Promise<void> {
 
     if (activePointers.size === 1) {
       const [ndcX, ndcY] = computeCanvasNdc(e.clientX, e.clientY);
+      const wantPan = e.button === 1 || e.button === 2 || e.shiftKey;
       gesture.pointerId = e.pointerId;
+      gesture.button = e.button;
+      gesture.shiftDown = e.shiftKey;
+      gesture.altDown = e.altKey;
       gesture.downX = e.clientX;
       gesture.downY = e.clientY;
       gesture.downTimeMs = performance.now();
       gesture.ndcX = ndcX;
       gesture.ndcY = ndcY;
-      gesture.isOrbiting = false;
+      gesture.isDragging = false;
+      gesture.dragMode = wantPan ? 'pan' : 'orbit';
       gesture.pendantStarted = false;
     } else if (activePointers.size >= 2) {
       if (gesture.pendantStarted) {
         engine.cancelPendantDrop();
         gesture.pendantStarted = false;
       }
-      gesture.isOrbiting = true;
-      prevPinchDist = getPinchDistance();
+      gesture.isDragging = true;
+      const pm = getPinchMetrics();
+      prevPinchDist = pm.dist;
+      prevPinchMidX = pm.midX;
+      prevPinchMidY = pm.midY;
     }
   });
 
@@ -130,27 +153,45 @@ async function bootstrap(): Promise<void> {
     prev.x = e.clientX;
     prev.y = e.clientY;
 
+    const viewH = Math.max(1, canvas.clientHeight || 800);
+
     if (activePointers.size === 1 && e.pointerId === gesture.pointerId) {
-      if (!gesture.isOrbiting) {
+      if (!gesture.isDragging) {
         const dragDist = Math.hypot(e.clientX - gesture.downX, e.clientY - gesture.downY);
-        if (dragDist < DRAG_ORBIT_THRESHOLD_PX) {
+        const thresh = gesture.dragMode === 'pan' ? 3.5 : DRAG_ORBIT_THRESHOLD_PX;
+        if (dragDist < thresh) {
           return;
         }
         if (gesture.pendantStarted) {
           engine.cancelPendantDrop();
           gesture.pendantStarted = false;
         }
-        gesture.isOrbiting = true;
+        gesture.isDragging = true;
       }
-      engine.camera.orbit(-dx * 0.0048, dy * 0.0042);
+      if (gesture.dragMode === 'pan' || e.shiftKey) {
+        engine.clearSubjectLock();
+        engine.camera.panScreen(dx / viewH, dy / viewH);
+        syncFocusButton();
+      } else {
+        engine.camera.orbit(-dx * 0.0048, dy * 0.0042);
+      }
       for (const b of camButtons) b.classList.remove('is-active');
     } else if (activePointers.size === 2) {
-      const currDist = getPinchDistance();
-      if (prevPinchDist > 8 && currDist > 8) {
-        engine.camera.dolly(prevPinchDist / currDist);
+      const pm = getPinchMetrics();
+      if (prevPinchDist > 8 && pm.dist > 8) {
+        engine.camera.dolly(prevPinchDist / pm.dist);
+        const panDx = pm.midX - prevPinchMidX;
+        const panDy = pm.midY - prevPinchMidY;
+        if (Math.hypot(panDx, panDy) > 0.5) {
+          engine.clearSubjectLock();
+          engine.camera.panScreen(panDx / viewH, panDy / viewH);
+          syncFocusButton();
+        }
         for (const b of camButtons) b.classList.remove('is-active');
       }
-      prevPinchDist = currDist;
+      prevPinchDist = pm.dist;
+      prevPinchMidX = pm.midX;
+      prevPinchMidY = pm.midY;
     }
   });
 
@@ -167,20 +208,26 @@ async function bootstrap(): Promise<void> {
       if (gesture.pendantStarted) {
         engine.cancelPendantDrop();
       }
-    } else if (!gesture.isOrbiting) {
-      if (gesture.pendantStarted) {
-        if (engine.hasActivePendantDrop()) {
-          engine.releasePendantDrop();
+    } else if (!gesture.isDragging) {
+      if (gesture.button === 2 || (gesture.button === 0 && gesture.altDown)) {
+        engine.focusNearestSubjectAtNdc(gesture.ndcX, gesture.ndcY);
+        for (const b of camButtons) b.classList.remove('is-active');
+        syncFocusButton();
+      } else if (gesture.button === 0 && !gesture.shiftDown) {
+        if (gesture.pendantStarted) {
+          if (engine.hasActivePendantDrop()) {
+            engine.releasePendantDrop();
+            syncPlayButton();
+          }
+        } else {
+          engine.triggerQuickPipetteDropAtNdc(gesture.ndcX, gesture.ndcY);
           syncPlayButton();
         }
-      } else {
-        engine.triggerQuickPipetteDropAtNdc(gesture.ndcX, gesture.ndcY);
-        syncPlayButton();
       }
     }
 
     gesture.pointerId = null;
-    gesture.isOrbiting = false;
+    gesture.isDragging = false;
     gesture.pendantStarted = false;
   };
   window.addEventListener('pointerup', endPointer);
@@ -190,20 +237,30 @@ async function bootstrap(): Promise<void> {
     'wheel',
     (e) => {
       e.preventDefault();
-      const zoomFactor = Math.exp(e.deltaY * 0.0011);
-      engine.camera.dolly(zoomFactor);
+      if (e.shiftKey) {
+        const viewH = Math.max(1, canvas.clientHeight || 800);
+        engine.clearSubjectLock();
+        engine.camera.panScreen(-e.deltaX / viewH, -e.deltaY / viewH);
+        syncFocusButton();
+      } else {
+        const zoomFactor = Math.exp(e.deltaY * 0.0011);
+        engine.camera.dolly(zoomFactor);
+      }
       for (const b of camButtons) b.classList.remove('is-active');
     },
     { passive: false }
   );
 
   // HUD bindings
+  const hud = document.getElementById('hud');
   const hudTime = document.getElementById('hud-time');
   const hudPhase = document.getElementById('hud-phase');
   const hudFpsMode = document.getElementById('hud-fps-mode');
   const btnPlay = document.getElementById('btn-play');
+  const btnStep = document.getElementById('btn-step');
   const btnReplay = document.getElementById('btn-replay');
   const btnDrop = document.getElementById('btn-drop');
+  const btnFocus = document.getElementById('btn-focus');
   const btnLighting = document.getElementById('btn-lighting');
   const btnZen = document.getElementById('btn-zen');
   const speedButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.speed-btn'));
@@ -217,8 +274,14 @@ async function bootstrap(): Promise<void> {
       btnPlay.textContent = engine.paused ? 'Play' : 'Pause';
       btnPlay.classList.toggle('is-active', engine.paused);
     }
+    hud?.classList.toggle('is-paused', engine.paused);
   };
   syncPlayButton();
+
+  const syncFocusButton = () => {
+    btnFocus?.classList.toggle('is-active', engine.hasSubjectLock());
+  };
+  syncFocusButton();
 
   const syncLightingButton = () => {
     const isDark = engine.config.lightingMode > 0.5;
@@ -234,10 +297,16 @@ async function bootstrap(): Promise<void> {
     syncPlayButton();
   });
 
+  btnStep?.addEventListener('click', (e) => {
+    engine.stepPausedSubsteps(e.shiftKey ? 5 : 1);
+    syncPlayButton();
+  });
+
   btnReplay?.addEventListener('click', () => {
     engine.paused = false;
     engine.resetSimulation();
     syncPlayButton();
+    syncFocusButton();
   });
 
   btnDrop?.addEventListener('click', () => {
@@ -245,6 +314,12 @@ async function bootstrap(): Promise<void> {
     const jitterZ = (Math.random() - 0.5) * 0.14;
     engine.triggerQuickPipetteDrop([jitterX, jitterZ]);
     syncPlayButton();
+  });
+
+  btnFocus?.addEventListener('click', () => {
+    engine.cycleFocusSubject();
+    for (const b of camButtons) b.classList.remove('is-active');
+    syncFocusButton();
   });
 
   btnLighting?.addEventListener('click', () => {
@@ -275,19 +350,53 @@ async function bootstrap(): Promise<void> {
       if (!id) return;
       engine.setCameraPreset(id, false);
       for (const b of camButtons) b.classList.toggle('is-active', b === btn);
+      syncFocusButton();
     });
   }
 
   window.addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-    if (e.code === 'Space') {
+    if (e.code === 'Space' || e.key === ' ') {
       e.preventDefault();
       engine.paused = !engine.paused;
       syncPlayButton();
+    } else if (
+      e.code === 'Period' ||
+      e.code === 'BracketRight' ||
+      e.key === '.' ||
+      e.key === '>' ||
+      e.key === ']'
+    ) {
+      e.preventDefault();
+      engine.stepPausedSubsteps(e.shiftKey ? 5 : 1);
+      syncPlayButton();
+    } else if (e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      engine.cycleFocusSubject();
+      for (const b of camButtons) b.classList.remove('is-active');
+      syncFocusButton();
+    } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      e.preventDefault();
+      const step = e.shiftKey ? 0.11 : 0.045;
+      const dx = e.code === 'ArrowLeft' ? step : e.code === 'ArrowRight' ? -step : 0.0;
+      const dy = e.code === 'ArrowUp' ? -step : e.code === 'ArrowDown' ? step : 0.0;
+      engine.clearSubjectLock();
+      engine.camera.panScreen(dx, dy);
+      for (const b of camButtons) b.classList.remove('is-active');
+      syncFocusButton();
+    } else if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      engine.camera.dolly(0.84);
+      for (const b of camButtons) b.classList.remove('is-active');
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      engine.camera.dolly(1.19);
+      for (const b of camButtons) b.classList.remove('is-active');
     } else if (e.key === 'r' || e.key === 'R') {
       engine.paused = false;
       engine.resetSimulation();
       syncPlayButton();
+      syncFocusButton();
     } else if (e.key === 'd' || e.key === 'D') {
       const jitterX = (Math.random() - 0.5) * 0.14;
       const jitterZ = (Math.random() - 0.5) * 0.14;
@@ -343,7 +452,10 @@ async function bootstrap(): Promise<void> {
     if (
       gesture.pointerId !== null &&
       activePointers.size === 1 &&
-      !gesture.isOrbiting
+      !gesture.isDragging &&
+      gesture.button === 0 &&
+      !gesture.shiftDown &&
+      !gesture.altDown
     ) {
       const heldMs = now - gesture.downTimeMs;
       if (!gesture.pendantStarted && heldMs >= PENDANT_HOLD_DELAY_MS) {

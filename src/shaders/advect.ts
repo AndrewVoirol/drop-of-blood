@@ -221,10 +221,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let maxG = max(max(max(s000, s100), max(s010, s110)), max(max(s001, s101), max(s011, s111)));
   var cLysed = clamp(gCorr, minG, maxG);
 
-  // Co-moving molecular diffusion + ambient dilution so suspended free hemoglobin forms a soft dispersing cloud around tendrils
-  let diffBlend = clamp(dt * 4.80, 0.0, 0.088);
+  // Co-moving molecular diffusion + gentle ambient dilution so suspended free hemoglobin forms a continuous translucent ruby-rose cloud around tendrils
+  let diffBlend = clamp(dt * 5.60, 0.0, 0.105);
   cLysed = mix(cLysed, lapNeighborsG, diffBlend);
-  let upperDilute = exp(-dt * mix(0.11, 0.22, smoothstep(yMin + 0.045, yMin + 0.26, p.y)));
+  let upperDilute = exp(-dt * mix(0.016, 0.034, smoothstep(yMin + 0.045, yMin + 0.26, p.y)));
   cLysed = cLysed * upperDilute;
 
   let dmTransfer = f32(rawLysed) * ${(1.0 / SPLAT_FP_SCALE).toExponential(8)};
