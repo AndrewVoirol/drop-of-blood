@@ -4,3 +4,4 @@ dist/
 *.local
 artifacts/
 .verify-out/
+.vercel/
